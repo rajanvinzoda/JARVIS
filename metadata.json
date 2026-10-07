@@ -1,0 +1,6 @@
+{
+  "name": "J.A.R.V.I.S. OS",
+  "description": "Futuristic cybernetic AI desktop assistant running on Windows with live system monitoring, voice interaction, file system control, app launcher, and BluesMinds AI orchestration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
