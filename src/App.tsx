@@ -24,13 +24,27 @@ import {
   Layers,
   Sparkles,
   ShieldAlert,
+  Activity,
+  Lock,
+  Power,
+  Search,
+  Clipboard,
 } from 'lucide-react';
+
+type ProcessingState =
+  | 'IDLE'
+  | 'ANALYZING'
+  | 'EXECUTING'
+  | 'WAITING FOR CONFIRMATION'
+  | 'COMPLETED'
+  | 'ERROR';
 
 interface LogMessage {
   id: string;
   sender: 'user' | 'jarvis';
   text: string;
   timestamp: string;
+  operation_id?: string;
   isProcessing?: boolean;
   action?: {
     tool: string;
@@ -43,13 +57,15 @@ interface SystemTelemetry {
   cpu: { percent: number; cores?: number; model?: string };
   memory: { percent: number; total_gb?: number; used_gb?: number };
   disk: { percent: number; total_gb?: number; used_gb?: number };
-  network: { mbps: number; status: string };
+  network: { mbps: number; status: string; download_mbps?: number; upload_mbps?: number };
   battery: { percent: number; status_text: string; charging?: boolean };
+  gpu?: { name?: string; available?: boolean; load_percent?: number };
   os?: { platform: string; hostname?: string; uptime_seconds?: number };
 }
 
 interface PendingConfirmation {
   confirmation_id: string;
+  operation_id?: string;
   prompt: string;
   path?: string;
   action?: string;
@@ -62,6 +78,13 @@ interface FileItem {
   size_display: string;
   modified: string;
   path: string;
+}
+
+interface ProcessItem {
+  pid: number;
+  name: string;
+  cpu_percent: number;
+  memory_percent: number;
 }
 
 export default function App() {
@@ -79,7 +102,12 @@ export default function App() {
     disk: { percent: 38.0 },
     network: { mbps: 72, status: 'online' },
     battery: { percent: 98, status_text: 'AC Line Power' },
+    gpu: { name: 'GPU: TELEMETRY PENDING', available: false },
   });
+
+  // Processing State
+  const [processingState, setProcessingState] = useState<ProcessingState>('IDLE');
+  const [neuralLinkOnline, setNeuralLinkOnline] = useState<boolean>(true);
 
   // Notes
   const [notes, setNotes] = useState('');
@@ -90,7 +118,6 @@ export default function App() {
   const [inputVal, setInputVal] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [histIndex, setHistIndex] = useState<number>(-1);
-  const [isProcessing, setIsProcessing] = useState(false);
 
   // Audio & Voice
   const [voxEnabled, setVoxEnabled] = useState(false);
@@ -98,15 +125,18 @@ export default function App() {
 
   // Modals & Drawers
   const [activeModal, setActiveModal] = useState<
-    'none' | 'apps' | 'files' | 'agent' | 'help' | 'viewFile'
+    'none' | 'apps' | 'files' | 'agent' | 'help' | 'viewFile' | 'processes' | 'windows'
   >('none');
   const [fileList, setFileList] = useState<FileItem[]>([]);
   const [currentFolder, setCurrentFolder] = useState('desktop');
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [selectedFileContent, setSelectedFileContent] = useState<{
     name: string;
     content: string;
     size: number;
   } | null>(null);
+  const [processList, setProcessList] = useState<ProcessItem[]>([]);
+  const [clipboardText, setClipboardText] = useState<string>('');
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
 
   // Local vs Cloud Backend Target
@@ -196,7 +226,6 @@ export default function App() {
 
   // 4. Notes Persistence
   useEffect(() => {
-    // Initial fetch from backend with localStorage fallback
     fetch(`${backendEndpoint}/notes`)
       .then((r) => r.json())
       .then((d) => {
@@ -218,7 +247,6 @@ export default function App() {
     try {
       localStorage.setItem('jarvis-notes', val);
     } catch {}
-    // Debounce backend save
     fetch(`${backendEndpoint}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -231,7 +259,6 @@ export default function App() {
     if (!('speechSynthesis' in window)) return;
     try {
       window.speechSynthesis.cancel();
-      // Clean up markdown / symbols for smoother speech
       const cleanText = text.replace(/[*#`_\[\]()]/g, '').trim();
       const utter = new SpeechSynthesisUtterance(cleanText);
       utter.rate = 1.05;
@@ -316,13 +343,15 @@ export default function App() {
 
   const addJarvisLog = (
     text: string,
-    action?: { tool: string; args?: any; result?: any }
+    action?: { tool: string; args?: any; result?: any },
+    opId?: string
   ) => {
     const newLog: LogMessage = {
       id: Math.random().toString(36).substring(2, 9),
       sender: 'jarvis',
       text,
       timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      operation_id: opId,
       action,
     };
     setConsoleLogs((prev) => [...prev, newLog]);
@@ -341,7 +370,7 @@ export default function App() {
 
     const low = raw.toLowerCase().replace(/[?!.]+$/, '');
 
-    // 1. Direct local commands
+    // 1. Direct local deterministic commands
     if (low === 'theme') {
       const r = document.documentElement;
       const currentDark =
@@ -385,7 +414,7 @@ export default function App() {
     if (low === 'help') {
       setActiveModal('help');
       const msg =
-        'Direct commands: time, date, scan, theme, vox, clear, apps, files, note <text>, calc <expr>, search <query>, who are you. Or speak natural language queries.';
+        'Direct commands: time, date, scan, theme, vox, clear, apps, files, processes, windows, clip, note <text>, calc <expr>, search <query>, who are you.';
       addJarvisLog(msg);
       if (voxEnabled) speak('Displaying system capabilities and commands, sir.');
       return;
@@ -404,6 +433,24 @@ export default function App() {
       return;
     }
 
+    if (low === 'processes' || low.includes('what is using the most ram') || low.includes('top processes')) {
+      fetchProcesses();
+      setActiveModal('processes');
+      addJarvisLog('Displaying top active processes by memory utilization, sir.');
+      return;
+    }
+
+    if (low === 'windows' || low === 'power') {
+      setActiveModal('windows');
+      addJarvisLog('Opening Windows power controls, sir.');
+      return;
+    }
+
+    if (low === 'clip' || low === 'clipboard') {
+      fetchClipboard();
+      return;
+    }
+
     if (low.startsWith('note ')) {
       const noteContent = raw.slice(5).trim();
       const updated = (notes ? notes + '\n' : '') + noteContent;
@@ -415,17 +462,16 @@ export default function App() {
     }
 
     // 2. Send to AI Orchestration Backend
-    setIsProcessing(true);
-    setHudStatus('PROCESSING, SIR...');
+    setProcessingState('ANALYZING');
+    setHudStatus('ANALYZING INTENT...');
 
-    // Add temporary processing log
     const processingId = Math.random().toString(36).substring(2, 9);
     setConsoleLogs((prev) => [
       ...prev,
       {
         id: processingId,
         sender: 'jarvis',
-        text: 'Processing, sir...',
+        text: 'Analyzing request and evaluating local tool security, sir...',
         timestamp: new Date().toLocaleTimeString([], { hour12: false }),
         isProcessing: true,
       },
@@ -444,7 +490,6 @@ export default function App() {
         }),
       });
 
-      // Remove the processing indicator
       setConsoleLogs((prev) => prev.filter((l) => l.id !== processingId));
 
       if (!response.ok) {
@@ -454,20 +499,30 @@ export default function App() {
       const data = await response.json();
       const reply = data.response || 'Action processed, sir.';
 
-      // Check if action requires explicit user confirmation
-      if (data.requires_confirmation) {
-        setPendingConfirm(data.requires_confirmation);
+      if (data.offline) {
+        setNeuralLinkOnline(false);
+      } else {
+        setNeuralLinkOnline(true);
       }
 
-      addJarvisLog(reply, data.action);
+      if (data.requires_confirmation) {
+        setProcessingState('WAITING FOR CONFIRMATION');
+        setPendingConfirm(data.requires_confirmation);
+      } else {
+        setProcessingState('COMPLETED');
+        setTimeout(() => setProcessingState('IDLE'), 3000);
+      }
+
+      addJarvisLog(reply, data.action, data.operation_id);
       if (voxEnabled) speak(reply);
     } catch (err: any) {
       setConsoleLogs((prev) => prev.filter((l) => l.id !== processingId));
+      setProcessingState('ERROR');
+      setNeuralLinkOnline(false);
       const failMsg = `Neural connection timed out or unreachable (${err.message}). Local systems remain active, sir.`;
       addJarvisLog(failMsg);
       if (voxEnabled) speak(failMsg);
-    } finally {
-      setIsProcessing(false);
+      setTimeout(() => setProcessingState('IDLE'), 3500);
     }
   };
 
@@ -476,6 +531,7 @@ export default function App() {
     if (!pendingConfirm) return;
     const cid = pendingConfirm.confirmation_id;
     setPendingConfirm(null);
+    setProcessingState('EXECUTING');
 
     try {
       const res = await fetch(`${backendEndpoint}/confirm`, {
@@ -485,10 +541,14 @@ export default function App() {
       });
       const data = await res.json();
       const msg = data.message || (approved ? 'Execution confirmed, sir.' : 'Execution cancelled, sir.');
+      setProcessingState('COMPLETED');
       addJarvisLog(msg);
       if (voxEnabled) speak(msg);
     } catch {
+      setProcessingState('ERROR');
       addJarvisLog('Confirmation communication failed, sir.');
+    } finally {
+      setTimeout(() => setProcessingState('IDLE'), 2500);
     }
   };
 
@@ -506,6 +566,34 @@ export default function App() {
     } catch {
       setFileList([]);
     }
+  };
+
+  // Search files
+  const searchFiles = async () => {
+    if (!fileSearchQuery.trim()) {
+      fetchFolderFiles(currentFolder);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${backendEndpoint}/files/search?folder=${encodeURIComponent(
+          currentFolder
+        )}&q=${encodeURIComponent(fileSearchQuery)}`
+      );
+      const data = await res.json();
+      if (data.success && data.matches) {
+        setFileList(
+          data.matches.map((m: any) => ({
+            name: m.name,
+            type: 'file',
+            size_bytes: m.size_bytes,
+            size_display: `${(m.size_bytes / 1024).toFixed(1)} KB`,
+            modified: m.modified,
+            path: m.relative_path,
+          }))
+        );
+      }
+    } catch {}
   };
 
   // View specific file
@@ -532,6 +620,30 @@ export default function App() {
     }
   };
 
+  // Processes fetch
+  const fetchProcesses = async () => {
+    try {
+      const res = await fetch(`${backendEndpoint}/processes?limit=15`);
+      const data = await res.json();
+      if (data.success && data.top_processes) {
+        setProcessList(data.top_processes);
+      }
+    } catch {}
+  };
+
+  // Clipboard fetch
+  const fetchClipboard = async () => {
+    try {
+      const res = await fetch(`${backendEndpoint}/clipboard`);
+      const data = await res.json();
+      const txt = data.text || '';
+      setClipboardText(txt);
+      addJarvisLog(
+        txt ? `Clipboard contains:\n"${txt}"` : 'Clipboard is currently empty, sir.'
+      );
+    } catch {}
+  };
+
   // Quick App Launch
   const handleLaunchApp = async (appKey: string) => {
     try {
@@ -552,6 +664,22 @@ export default function App() {
       addJarvisLog(`Application dispatch command failed, sir.`);
     }
     setActiveModal('none');
+  };
+
+  // Windows Power Operations
+  const handleWindowsPower = async (action: 'lock' | 'shutdown' | 'restart' | 'sleep') => {
+    try {
+      const res = await fetch(`${backendEndpoint}/windows/${action}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.requires_confirmation) {
+        setPendingConfirm(data);
+        setActiveModal('none');
+      } else {
+        addJarvisLog(data.message || `Dispatched ${action} sequence, sir.`);
+      }
+    } catch {}
   };
 
   // Keyboard Navigation for Console Input
@@ -585,6 +713,7 @@ export default function App() {
       if (res.ok) {
         setBackendEndpoint('http://127.0.0.1:5000/api');
         setIsLocalWindowsConnected(true);
+        setNeuralLinkOnline(true);
         addJarvisLog('Connected directly to local Windows Python Agent on port 5000, sir.');
         if (voxEnabled) speak('Local Windows agent connected successfully, sir.');
       } else {
@@ -630,43 +759,81 @@ export default function App() {
         </div>
       )}
 
-      {/* TOP STATUS BAR */}
-      <header className="px-4 py-2 border-b border-[var(--line)] bg-[var(--panel)] flex items-center justify-between text-xs tracking-wider">
-        <div className="flex items-center space-x-3">
+      {/* TOP STATUS BAR (Adhering to Section 44) */}
+      <header className="px-3 py-1.5 border-b border-[var(--line)] bg-[var(--panel)] flex flex-wrap items-center justify-between text-[11px] tracking-wider">
+        <div className="flex items-center space-x-2 sm:space-x-4">
           <span className="font-bold text-[var(--accent)] tracking-[0.2em]">J.A.R.V.I.S. OS</span>
-          <span className="text-[var(--dim)]">|</span>
-          <span className="text-[var(--dim)] hidden sm:inline">WINDOWS DESKTOP KERNEL</span>
-          <span className="text-[var(--dim)]">|</span>
-          <div className="flex items-center space-x-1.5">
-            <span
-              className={`inline-block w-2 h-2 rounded-full ${
-                isLocalWindowsConnected
-                  ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
-                  : 'bg-[var(--accent)] shadow-[0_0_8px_var(--accent)]'
-              }`}
-            />
-            <span className="text-xs text-[var(--dim)]">
-              {isLocalWindowsConnected ? 'LOCAL WINDOWS AGENT (5000)' : 'CLOUD GATEWAY GATEWAY'}
+          <span className="text-[var(--dim)] hidden sm:inline">|</span>
+
+          {/* Core Status Badges */}
+          <div className="flex items-center space-x-3 text-[10px]">
+            <span className="flex items-center space-x-1">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+              <span className="text-[var(--dim)]">LOCAL CORE:</span>
+              <span className="text-emerald-300 font-bold">ONLINE</span>
+            </span>
+
+            <span className="flex items-center space-x-1">
+              <span
+                className={`inline-block w-1.5 h-1.5 rounded-full ${
+                  neuralLinkOnline
+                    ? 'bg-[var(--accent)] shadow-[0_0_6px_var(--accent)]'
+                    : 'bg-red-500 shadow-[0_0_6px_#ef4444]'
+                }`}
+              />
+              <span className="text-[var(--dim)]">NEURAL LINK:</span>
+              <span
+                className={`font-bold ${
+                  neuralLinkOnline ? 'text-[var(--accent)]' : 'text-red-400'
+                }`}
+              >
+                {neuralLinkOnline ? 'ONLINE' : 'OFFLINE'}
+              </span>
+            </span>
+
+            <span className="hidden md:flex items-center space-x-1">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="text-[var(--dim)]">FILESYSTEM:</span>
+              <span className="text-emerald-300 font-bold">READY</span>
             </span>
           </div>
         </div>
 
+        {/* Right Header Controls */}
         <div className="flex items-center space-x-2">
+          {/* Active Processing State Badge */}
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+              processingState === 'IDLE'
+                ? 'border-[var(--line)] text-[var(--dim)]'
+                : processingState === 'ERROR'
+                ? 'border-red-500 text-red-300 bg-red-950/40 animate-pulse'
+                : processingState === 'WAITING FOR CONFIRMATION'
+                ? 'border-amber-500 text-amber-300 bg-amber-950/40 animate-pulse'
+                : 'border-[var(--accent)] text-[var(--accent)] bg-[var(--line)] animate-pulse'
+            }`}
+          >
+            STATE: {processingState}
+          </span>
+
           <button
             onClick={() => setActiveModal('agent')}
-            className="hud-button text-[11px] py-0.5 px-2 flex items-center space-x-1"
+            className="hud-button text-[10px] py-0.5 px-2 flex items-center space-x-1"
             title="Configure Local Windows Python Server"
           >
-            <Monitor className="w-3.5 h-3.5 inline mr-1" />
-            <span className="hidden md:inline">WINDOWS AGENT</span>
+            <Monitor className="w-3 h-3 inline mr-1" />
+            <span className="hidden md:inline">
+              {isLocalWindowsConnected ? 'WINDOWS: 5000' : 'WINDOWS AGENT'}
+            </span>
           </button>
+
           <button
             onClick={() => {
               const r = document.documentElement;
               const isDark = r.dataset.theme !== 'light';
               r.dataset.theme = isDark ? 'light' : 'dark';
             }}
-            className="hud-button text-[11px] py-0.5 px-2"
+            className="hud-button text-[10px] py-0.5 px-2"
             title="Toggle Day/Stealth Theme"
           >
             THEME
@@ -694,10 +861,22 @@ export default function App() {
 
           {/* SYSTEM DIAGNOSTICS */}
           <div className="hud-panel p-3 flex flex-col space-y-3">
-            <h2 className="hud-title flex items-center justify-between">
-              <span>SYSTEM DIAGNOSTICS</span>
-              <Cpu className="w-3 h-3 text-[var(--accent)]" />
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="hud-title mb-0 flex items-center space-x-1">
+                <Cpu className="w-3 h-3 text-[var(--accent)]" />
+                <span>SYSTEM DIAGNOSTICS</span>
+              </h2>
+              <button
+                onClick={() => {
+                  fetchProcesses();
+                  setActiveModal('processes');
+                }}
+                className="hud-button text-[10px] py-0.5 px-1.5 opacity-90"
+                title="View active processes"
+              >
+                PROCS
+              </button>
+            </div>
 
             {/* Core Load */}
             <div>
@@ -744,7 +923,7 @@ export default function App() {
             {/* Network Throughput */}
             <div>
               <div className="flex justify-between text-xs text-[var(--dim)]">
-                <span>NETWORK</span>
+                <span>NETWORK THROUGHPUT</span>
                 <span className="text-[var(--accent)] font-mono">
                   {systemStats.network.mbps} Mb/s
                 </span>
@@ -764,6 +943,14 @@ export default function App() {
               <span>DEVICE POWER:</span>
               <span className="text-[var(--accent)] font-mono">
                 {systemStats.battery.status_text}
+              </span>
+            </div>
+
+            {/* GPU Telemetry */}
+            <div className="text-[11px] text-[var(--dim)] flex items-center justify-between">
+              <span>GPU TELEMETRY:</span>
+              <span className="text-[var(--accent)] font-mono text-[10px]">
+                {systemStats.gpu?.name || 'GPU: UNAVAILABLE'}
               </span>
             </div>
 
@@ -807,7 +994,7 @@ export default function App() {
             <textarea
               value={notes}
               onChange={(e) => handleNotesChange(e.target.value)}
-              placeholder="Jot something down, sir... (Synced with AI memory)"
+              placeholder="Jot something down, sir... (Synced with SQLite database)"
               className="flex-1 w-full bg-transparent border border-[var(--line)] text-[var(--text)] text-xs font-mono p-2 rounded resize-none outline-none focus:border-[var(--accent)]"
             />
           </div>
@@ -815,7 +1002,6 @@ export default function App() {
 
         {/* ================= CENTER COLUMN (ARC REACTOR & CONTROLS) ================= */}
         <div className="hud-panel p-4 flex flex-col items-center justify-center text-center relative overflow-hidden">
-          {/* Subtle Cybernetic Grid Background */}
           <div className="absolute inset-0 pointer-events-none opacity-5 bg-[linear-gradient(to_right,#12d6ff_1px,transparent_1px),linear-gradient(to_bottom,#12d6ff_1px,transparent_1px)] bg-[size:24px_24px]" />
 
           {/* ARC REACTOR SVG */}
@@ -894,7 +1080,7 @@ export default function App() {
           </div>
 
           {/* Quick HUD Navigation Buttons */}
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 w-full max-w-lg mt-auto pt-3 border-t border-[var(--line)]">
+          <div className="grid grid-cols-4 sm:grid-cols-7 gap-2 w-full max-w-lg mt-auto pt-3 border-t border-[var(--line)]">
             <button onClick={() => executeCommand('time')} className="hud-button text-xs py-1.5">
               TIME
             </button>
@@ -913,6 +1099,9 @@ export default function App() {
             >
               FILES
             </button>
+            <button onClick={() => setActiveModal('windows')} className="hud-button text-xs py-1.5">
+              POWER
+            </button>
             <button onClick={() => executeCommand('theme')} className="hud-button text-xs py-1.5">
               THEME
             </button>
@@ -929,7 +1118,14 @@ export default function App() {
               <Terminal className="w-3.5 h-3.5 text-[var(--accent)]" />
               <span>COMMAND CONSOLE</span>
             </h2>
-            <div className="flex items-center space-x-1">
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={fetchClipboard}
+                className="text-[var(--dim)] hover:text-[var(--accent)]"
+                title="Inspect Clipboard"
+              >
+                <Clipboard className="w-3.5 h-3.5" />
+              </button>
               <span className="text-[10px] text-[var(--dim)] font-mono">
                 {consoleLogs.length} LOGS
               </span>
@@ -962,13 +1158,20 @@ export default function App() {
                         <Sparkles className="w-2.5 h-2.5 inline" />
                         <span>JARVIS</span>
                       </span>
-                      <span>{log.timestamp}</span>
+                      <div className="flex items-center space-x-2">
+                        {log.operation_id && (
+                          <span className="text-[9px] bg-[var(--line)] px-1 rounded text-[var(--accent)]">
+                            {log.operation_id}
+                          </span>
+                        )}
+                        <span>{log.timestamp}</span>
+                      </div>
                     </div>
 
                     {log.isProcessing ? (
                       <div className="flex items-center space-x-2 text-[var(--accent)] py-1">
                         <RefreshCw className="w-3 h-3 animate-spin" />
-                        <span className="italic">Processing intent and tool execution, sir...</span>
+                        <span className="italic">{log.text}</span>
                       </div>
                     ) : (
                       <div className="whitespace-pre-wrap">{log.text}</div>
@@ -1000,9 +1203,16 @@ export default function App() {
           {/* DESTRUCTIVE ACTION CONFIRMATION BAR */}
           {pendingConfirm && (
             <div className="mt-2 p-2.5 bg-red-950/70 border border-red-500 rounded text-xs space-y-2 animate-pulse">
-              <div className="flex items-center space-x-2 text-red-300 font-bold">
-                <ShieldAlert className="w-4 h-4 text-red-400" />
-                <span>CONFIRMATION REQUIRED</span>
+              <div className="flex items-center justify-between text-red-300 font-bold">
+                <span className="flex items-center space-x-1.5">
+                  <ShieldAlert className="w-4 h-4 text-red-400" />
+                  <span>CONFIRMATION REQUIRED</span>
+                </span>
+                {pendingConfirm.operation_id && (
+                  <span className="text-[9px] text-red-400 font-mono">
+                    {pendingConfirm.operation_id}
+                  </span>
+                )}
               </div>
               <div className="text-neutral-200">{pendingConfirm.prompt}</div>
               <div className="flex items-center space-x-2 pt-1">
@@ -1029,8 +1239,14 @@ export default function App() {
               value={inputVal}
               onChange={(e) => setInputVal(e.target.value)}
               onKeyDown={handleKeyDown}
-              disabled={isProcessing}
-              placeholder={isProcessing ? 'Processing...' : 'Type a command or query...'}
+              disabled={processingState === 'ANALYZING' || processingState === 'EXECUTING'}
+              placeholder={
+                processingState === 'ANALYZING'
+                  ? 'Analyzing intent...'
+                  : processingState === 'EXECUTING'
+                  ? 'Executing local tool...'
+                  : 'Type a command or query...'
+              }
               className="hud-input flex-1 text-xs"
               autoComplete="off"
             />
@@ -1064,6 +1280,108 @@ export default function App() {
 
       {/* ================= MODALS & DRAWERS ================= */}
 
+      {/* TOP PROCESSES MODAL */}
+      {activeModal === 'processes' && (
+        <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="hud-panel p-5 max-w-lg w-full bg-[var(--panel-solid)] space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-[var(--line)] pb-2">
+              <h3 className="hud-title mb-0 flex items-center space-x-2">
+                <Activity className="w-4 h-4 text-[var(--accent)]" />
+                <span>ACTIVE WORKSTATION PROCESSES</span>
+              </h3>
+              <button
+                onClick={() => setActiveModal('none')}
+                className="text-[var(--dim)] hover:text-[var(--text)] text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-[var(--dim)]">
+              Read-only process monitoring via <code>psutil</code>. Sorted by memory consumption:
+            </p>
+            <div className="flex-1 overflow-y-auto space-y-1 font-mono text-xs">
+              {processList.length === 0 ? (
+                <div className="text-[var(--dim)] text-center py-6">Loading process metrics...</div>
+              ) : (
+                processList.map((p) => (
+                  <div
+                    key={p.pid}
+                    className="flex items-center justify-between p-2 rounded hover:bg-[var(--line)]/30 border border-transparent hover:border-[var(--line)]"
+                  >
+                    <div className="flex items-center space-x-2 truncate max-w-[60%]">
+                      <span className="text-[var(--dim)] text-[10px]">[{p.pid}]</span>
+                      <span className="truncate text-[var(--text)] font-bold">{p.name}</span>
+                    </div>
+                    <div className="flex items-center space-x-3 text-[11px]">
+                      <span className="text-[var(--dim)]">CPU: {p.cpu_percent}%</span>
+                      <span className="text-[var(--accent)] font-bold">RAM: {p.memory_percent}%</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="pt-2 border-t border-[var(--line)] flex justify-end">
+              <button onClick={fetchProcesses} className="hud-button text-xs py-1 px-3">
+                REFRESH PROCESSES
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WINDOWS POWER SUBROUTINES MODAL */}
+      {activeModal === 'windows' && (
+        <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="hud-panel p-5 max-w-sm w-full bg-[var(--panel-solid)] space-y-4">
+            <div className="flex items-center justify-between border-b border-[var(--line)] pb-2">
+              <h3 className="hud-title mb-0 flex items-center space-x-2">
+                <Power className="w-4 h-4 text-[var(--accent)]" />
+                <span>WINDOWS POWER &amp; SECURITY</span>
+              </h3>
+              <button
+                onClick={() => setActiveModal('none')}
+                className="text-[var(--dim)] hover:text-[var(--text)] text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-[var(--dim)]">
+              Controlled system actions. Shutdown, reboot, and sleep require explicit confirmation:
+            </p>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                onClick={() => handleWindowsPower('lock')}
+                className="hud-button p-3 flex flex-col items-center justify-center space-y-1"
+              >
+                <Lock className="w-4 h-4 text-[var(--accent)]" />
+                <span>LOCK WORKSTATION</span>
+              </button>
+              <button
+                onClick={() => handleWindowsPower('sleep')}
+                className="hud-button p-3 flex flex-col items-center justify-center space-y-1"
+              >
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>SLEEP COMPUTER</span>
+              </button>
+              <button
+                onClick={() => handleWindowsPower('restart')}
+                className="hud-button p-3 flex flex-col items-center justify-center space-y-1 text-amber-300 border-amber-400"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>RESTART (REBOOT)</span>
+              </button>
+              <button
+                onClick={() => handleWindowsPower('shutdown')}
+                className="hud-button p-3 flex flex-col items-center justify-center space-y-1 text-red-400 border-red-500"
+              >
+                <Power className="w-4 h-4" />
+                <span>SHUT DOWN</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* APPS LAUNCHER MODAL */}
       {activeModal === 'apps' && (
         <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
@@ -1081,8 +1399,7 @@ export default function App() {
               </button>
             </div>
             <p className="text-xs text-[var(--dim)]">
-              Select an authorized Windows application to launch safely without arbitrary shell
-              execution:
+              Authorized Windows applications launched safely without arbitrary command execution:
             </p>
             <div className="grid grid-cols-2 gap-2 text-xs">
               {[
@@ -1094,6 +1411,8 @@ export default function App() {
                 { key: 'terminal', label: 'Terminal / CMD' },
                 { key: 'settings', label: 'Windows Settings' },
                 { key: 'paint', label: 'Paint' },
+                { key: 'spotify', label: 'Spotify' },
+                { key: 'discord', label: 'Discord' },
               ].map((app) => (
                 <button
                   key={app.key}
@@ -1116,7 +1435,7 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-[var(--line)] pb-2">
               <h3 className="hud-title mb-0 flex items-center space-x-2">
                 <Folder className="w-4 h-4 text-[var(--accent)]" />
-                <span>PERMITTED FILE SYSTEM ACCESS</span>
+                <span>PERMITTED FILE SYSTEM SANDBOX</span>
               </h3>
               <button
                 onClick={() => setActiveModal('none')}
@@ -1126,19 +1445,39 @@ export default function App() {
               </button>
             </div>
 
-            {/* Folder Tabs */}
-            <div className="flex items-center space-x-2 text-xs border-b border-[var(--line)] pb-2">
-              {['desktop', 'documents', 'downloads', 'sandbox'].map((f) => (
-                <button
-                  key={f}
-                  onClick={() => fetchFolderFiles(f)}
-                  className={`hud-button uppercase py-1 px-3 ${
-                    currentFolder === f ? 'active' : ''
-                  }`}
-                >
-                  {f}
+            {/* Folder Tabs & Search */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] pb-2">
+              <div className="flex items-center space-x-2 text-xs">
+                {['desktop', 'documents', 'downloads', 'sandbox'].map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => {
+                      setFileSearchQuery('');
+                      fetchFolderFiles(f);
+                    }}
+                    className={`hud-button uppercase py-1 px-3 ${
+                      currentFolder === f ? 'active' : ''
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+
+              {/* Search input */}
+              <div className="flex items-center space-x-1">
+                <input
+                  type="text"
+                  value={fileSearchQuery}
+                  onChange={(e) => setFileSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && searchFiles()}
+                  placeholder="Search files..."
+                  className="hud-input text-[11px] py-1 px-2 w-32 sm:w-40"
+                />
+                <button onClick={searchFiles} className="hud-button p-1">
+                  <Search className="w-3.5 h-3.5" />
                 </button>
-              ))}
+              </div>
             </div>
 
             {/* File List Table */}
@@ -1151,7 +1490,7 @@ export default function App() {
                 fileList.map((item) => (
                   <div
                     key={item.name}
-                    className="flex items-center justify-between p-2 rounded hover:bg-[var(--line)] transition-colors"
+                    className="flex items-center justify-between p-2 rounded hover:bg-[var(--line)]/20 transition-colors"
                   >
                     <div className="flex items-center space-x-2 truncate max-w-[65%]">
                       {item.type === 'directory' ? (
@@ -1181,10 +1520,10 @@ export default function App() {
 
             {/* File Creation Prompt */}
             <div className="pt-2 border-t border-[var(--line)] flex items-center justify-between text-xs text-[var(--dim)]">
-              <span>Security Rule: All paths are strictly validated to prevent traversal.</span>
+              <span>Security Boundary: Traversal escapes (../) are actively blocked.</span>
               <button
                 onClick={() => {
-                  const fname = prompt('Enter new filename (e.g. project_plan.txt):');
+                  const fname = prompt('Enter new filename (e.g. project_plan.py):');
                   if (fname) {
                     const content = prompt('Enter initial file content:') || '';
                     fetch(`${backendEndpoint}/files/create`, {
@@ -1255,19 +1594,18 @@ export default function App() {
               </button>
             </div>
 
-            <div className="text-xs text-[var(--text)] space-y-3 leading-relaxed">
+            <div className="text-xs text-[var(--text)] space-y-3 leading-relaxed font-mono">
               <p>
-                To control your native Windows files, applications, and system metrics directly
-                from your desktop, run the J.A.R.V.I.S. Python backend on your PC:
+                To control your native Windows files, apps, and hardware directly on your PC,
+                launch the local J.A.R.V.I.S. Python server:
               </p>
 
-              <div className="bg-black/40 border border-[var(--line)] p-3 rounded font-mono text-[11px] text-[var(--accent)] space-y-1">
-                <div className="text-[var(--dim)]"># 1. Install dependencies:</div>
+              <div className="bg-black/40 border border-[var(--line)] p-3 rounded text-[11px] text-[var(--accent)] space-y-1">
+                <div className="text-[var(--dim)]"># 1. Double-click the launcher script:</div>
+                <div className="font-bold text-emerald-300">run_jarvis.bat</div>
+                <div className="text-[var(--dim)] mt-2"># Or manually start Flask:</div>
                 <div>pip install -r requirements.txt</div>
-                <div className="text-[var(--dim)] mt-2"># 2. Run Python server on your PC:</div>
                 <div>python backend/server.py</div>
-                <div className="text-[var(--dim)] mt-2"># Or double-click:</div>
-                <div>run_jarvis.bat</div>
               </div>
 
               <div className="p-3 bg-[var(--line)]/20 border border-[var(--line)] rounded space-y-2">
@@ -1311,7 +1649,7 @@ export default function App() {
               <div className="text-[11px] text-[var(--dim)]">
                 The Python server includes dynamic path resolution for your Windows user directory
                 (<code>%USERPROFILE%\Desktop</code>, <code>Documents</code>, <code>Downloads</code>)
-                with complete path traversal prevention.
+                with SQLite persistence in <code>data/jarvis.db</code>.
               </div>
             </div>
           </div>
@@ -1340,11 +1678,12 @@ export default function App() {
                 <span className="text-[var(--accent)] font-bold">NATURAL LANGUAGE EXAMPLES:</span>
                 <ul className="list-disc list-inside mt-1 space-y-1 text-[var(--dim)]">
                   <li>"Jarvis, what's on my desktop?"</li>
-                  <li>"Create a file called notes.txt on my desktop."</li>
+                  <li>"Create a file called project.py on my desktop."</li>
                   <li>"Read timetable.py."</li>
                   <li>"Open Visual Studio Code."</li>
+                  <li>"What's using the most RAM?"</li>
                   <li>"What are my current system diagnostics?"</li>
-                  <li>"Search Google for latest tech news."</li>
+                  <li>"Lock my computer."</li>
                 </ul>
               </div>
 
@@ -1361,7 +1700,16 @@ export default function App() {
                     <code className="text-[var(--text)]">apps</code> — App Registry
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">files</code> — Explorer
+                    <code className="text-[var(--text)]">files</code> — Sandbox Explorer
+                  </div>
+                  <div>
+                    <code className="text-[var(--text)]">processes</code> — Task Telemetry
+                  </div>
+                  <div>
+                    <code className="text-[var(--text)]">windows</code> — Power Control
+                  </div>
+                  <div>
+                    <code className="text-[var(--text)]">clip</code> — Clipboard Buffer
                   </div>
                   <div>
                     <code className="text-[var(--text)]">theme</code> — Day / Stealth
@@ -1371,9 +1719,6 @@ export default function App() {
                   </div>
                   <div>
                     <code className="text-[var(--text)]">note &lt;text&gt;</code> — Scratchpad
-                  </div>
-                  <div>
-                    <code className="text-[var(--text)]">clear</code> — Flush Console
                   </div>
                 </div>
               </div>

@@ -407,7 +407,25 @@ async function executeTool(name: string, args: any): Promise<any> {
   }
 
   if (name === 'open_application') {
-    const appKey = (args.app_key || args.app || '').toLowerCase();
+    const rawApp = (args.app_name || args.app_key || args.app || '').toLowerCase().trim();
+    const aliasMap: Record<string, string> = {
+      'file exploree': 'explorer',
+      'file explore': 'explorer',
+      'exploree': 'explorer',
+      'explorer': 'explorer',
+      'files': 'explorer',
+      'file explorer': 'explorer',
+      'windows explorer': 'explorer',
+      'folder': 'explorer',
+      'folders': 'explorer',
+      'code': 'vscode',
+      'vs code': 'vscode',
+      'visual studio code': 'vscode',
+      'browser': 'chrome',
+      'google chrome': 'chrome',
+      'calc': 'calculator',
+    };
+    const appKey = aliasMap[rawApp] || rawApp;
     const resolvedName = SAFE_APPS[appKey] || SAFE_APPS[appKey.replace(/\s+/g, '')];
     if (resolvedName) {
       return {
@@ -419,7 +437,7 @@ async function executeTool(name: string, args: any): Promise<any> {
     }
     return {
       success: false,
-      error: `Application '${args.app_key}' not in registered safe list (${Object.keys(SAFE_APPS).join(', ')}).`,
+      error: `Application '${args.app_name || args.app_key || args.app}' not in registered safe list (${Object.keys(SAFE_APPS).join(', ')}).`,
     };
   }
 
@@ -848,7 +866,25 @@ app.get('/api/apps', (req: Request, res: Response) => {
 });
 
 app.post('/api/apps/open', (req: Request, res: Response) => {
-  const appKey = (req.body.app || '').toLowerCase();
+  const rawApp = (req.body.app || '').toLowerCase().trim();
+  const aliasMap: Record<string, string> = {
+    'file exploree': 'explorer',
+    'file explore': 'explorer',
+    'exploree': 'explorer',
+    'explorer': 'explorer',
+    'files': 'explorer',
+    'file explorer': 'explorer',
+    'windows explorer': 'explorer',
+    'folder': 'explorer',
+    'folders': 'explorer',
+    'code': 'vscode',
+    'vs code': 'vscode',
+    'visual studio code': 'vscode',
+    'browser': 'chrome',
+    'google chrome': 'chrome',
+    'calc': 'calculator',
+  };
+  const appKey = aliasMap[rawApp] || rawApp;
   const name = SAFE_APPS[appKey];
   if (name) {
     res.json({ success: true, app: appKey, name, message: `Opening ${name}, sir.` });
@@ -898,6 +934,116 @@ app.post('/api/notes', (req: Request, res: Response) => {
   const content = req.body.notes || '';
   saveStoredNotes(content);
   res.json({ success: true, notes: content });
+});
+
+app.get('/api/processes', async (req: Request, res: Response) => {
+  try {
+    const list = await si.processes();
+    const sorted = list.list
+      .sort((a, b) => b.mem - a.mem)
+      .slice(0, 15)
+      .map((p) => ({
+        pid: p.pid,
+        name: p.name,
+        cpu_percent: +p.cpu.toFixed(1),
+        memory_percent: +p.mem.toFixed(1),
+      }));
+    res.json({ success: true, total_active: list.all, top_processes: sorted });
+  } catch (err: any) {
+    res.json({ success: false, error: err.message, top_processes: [] });
+  }
+});
+
+app.get('/api/files/search', (req: Request, res: Response) => {
+  const folder = (req.query.folder as string) || 'desktop';
+  const query = ((req.query.q as string) || '').toLowerCase();
+  const { resolved, error } = resolvePath(folder);
+  if (error || !fs.existsSync(resolved)) {
+    res.json({ success: false, error: error || 'Folder not found' });
+    return;
+  }
+
+  const matches: any[] = [];
+  function walk(current: string) {
+    const files = fs.readdirSync(current);
+    for (const f of files) {
+      const full = path.join(current, f);
+      const s = fs.statSync(full);
+      if (s.isDirectory()) {
+        walk(full);
+      } else if (f.toLowerCase().includes(query)) {
+        matches.push({
+          name: f,
+          size_bytes: s.size,
+          modified: s.mtime.toISOString().substring(0, 19),
+        });
+      }
+    }
+  }
+  try {
+    walk(resolved);
+  } catch {}
+  res.json({ success: true, query, matches: matches.slice(0, 30) });
+});
+
+let clipboardMemory = '';
+app.get('/api/clipboard', (req: Request, res: Response) => {
+  res.json({ success: true, text: clipboardMemory });
+});
+
+app.post('/api/clipboard', (req: Request, res: Response) => {
+  clipboardMemory = req.body.text || '';
+  res.json({ success: true, message: 'Clipboard updated.' });
+});
+
+app.post('/api/windows/lock', (req: Request, res: Response) => {
+  res.json({ success: true, message: 'Workstation lock sequence dispatched, sir.' });
+});
+
+app.post('/api/windows/shutdown', (req: Request, res: Response) => {
+  const cid = Math.random().toString(36).substring(2, 9);
+  pendingConfirmations.set(cid, {
+    action: 'shutdown_computer',
+    path: '',
+    createdAt: Date.now(),
+  });
+  res.json({
+    requires_confirmation: true,
+    confirmation_id: cid,
+    prompt: 'WARNING: Shutting down the computer will terminate all active programs. Proceed, sir?',
+  });
+});
+
+app.post('/api/windows/restart', (req: Request, res: Response) => {
+  const cid = Math.random().toString(36).substring(2, 9);
+  pendingConfirmations.set(cid, {
+    action: 'restart_computer',
+    path: '',
+    createdAt: Date.now(),
+  });
+  res.json({
+    requires_confirmation: true,
+    confirmation_id: cid,
+    prompt: 'WARNING: Restarting the system will reboot your computer. Proceed, sir?',
+  });
+});
+
+app.post('/api/windows/sleep', (req: Request, res: Response) => {
+  const cid = Math.random().toString(36).substring(2, 9);
+  pendingConfirmations.set(cid, {
+    action: 'sleep_computer',
+    path: '',
+    createdAt: Date.now(),
+  });
+  res.json({
+    requires_confirmation: true,
+    confirmation_id: cid,
+    prompt: 'Sir, would you like me to put the computer to sleep now?',
+  });
+});
+
+app.get('/api/logs', (req: Request, res: Response) => {
+  res.json({ logs: [] });
 });
 
 // Initialize server and mount Vite

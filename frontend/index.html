@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>J.A.R.V.I.S. OS</title>
+<link rel="stylesheet" href="css/jarvis.css">
+</head>
+<body>
+<div id="boot"></div>
+
+<header id="header-status">
+  <div>
+    <span style="font-weight:bold;color:var(--accent);">J.A.R.V.I.S. OS</span>
+    <span style="color:var(--dim);margin:0 6px;">|</span>
+    <span style="color:var(--dim);">LOCAL CORE:</span> <span class="pill pill-on"></span>ONLINE
+    <span style="color:var(--dim);margin:0 6px;">|</span>
+    <span style="color:var(--dim);">NEURAL LINK:</span> <span id="pill-ai" class="pill pill-on"></span><span id="ai-status">ONLINE</span>
+  </div>
+  <div>
+    <span style="color:var(--dim);">HOST: <span id="host-name">WINDOWS LOCALHOST</span></span>
+  </div>
+</header>
+
+<div id="app">
+  <!-- LEFT COLUMN -->
+  <div class="col">
+    <div class="panel">
+      <h2><span>CHRONOMETER</span></h2>
+      <div id="clock">--:--:--</div>
+      <div id="date">--</div>
+    </div>
+
+    <div class="panel">
+      <h2><span>SYSTEM DIAGNOSTICS</span> <button onclick="fetchTelemetry()" style="padding:1px 6px;font-size:10px;">SYNC</button></h2>
+      <div class="bar"><label><span>CORE LOAD</span><span id="v1">0%</span></label><div><i id="b1"></i></div></div>
+      <div class="bar"><label><span>MEMORY</span><span id="v2">0%</span></label><div><i id="b2"></i></div></div>
+      <div class="bar"><label><span>ARC OUTPUT (DISK)</span><span id="v3">0%</span></label><div><i id="b3"></i></div></div>
+      <div class="bar"><label><span>NETWORK</span><span id="v4">0 Mb/s</span></label><div><i id="b4"></i></div></div>
+      <div id="bat" style="font-size:11px;color:var(--dim);margin-top:8px">DEVICE POWER: AC LINE</div>
+      <div id="gpu" style="font-size:11px;color:var(--dim);margin-top:4px">GPU: CHECKING...</div>
+    </div>
+
+    <div class="panel" style="flex:1">
+      <h2><span>NOTES SCRATCHPAD</span> <button onclick="clearNotes()" style="padding:1px 6px;font-size:10px;">CLEAR</button></h2>
+      <textarea id="notes" placeholder="Jot something down, sir…"></textarea>
+    </div>
+  </div>
+
+  <!-- CENTER COLUMN (ARC REACTOR & BUTTONS) -->
+  <div class="panel" id="center">
+    <svg id="reactor" viewBox="0 0 300 300" aria-label="Arc reactor">
+      <g fill="none" stroke="var(--accent)">
+        <circle cx="150" cy="150" r="140" stroke-opacity=".3" stroke-width="1.5"/>
+        <g class="spin"><circle cx="150" cy="150" r="125" stroke-width="3.5" stroke-dasharray="40 18 8 18"/></g>
+        <g class="spin2"><circle cx="150" cy="150" r="100" stroke-width="2.5" stroke-dasharray="6 12"/></g>
+        <circle cx="150" cy="150" r="72" stroke-width="2.5" stroke-opacity=".85"/>
+        <g stroke-width="5" stroke-opacity=".9" stroke-linecap="round"><path d="M150 82v-18M150 218v18M82 150H64M218 150h18M102 102L89 89M198 198l13 13M198 102l13-13M102 198L89 211"/></g>
+      </g>
+      <circle id="core" cx="150" cy="150" r="40" fill="var(--accent)" fill-opacity=".25" stroke="var(--accent)" stroke-width="3"/>
+      <circle cx="150" cy="150" r="18" fill="var(--accent)"/>
+    </svg>
+    <div style="letter-spacing:.45em;font-weight:bold;color:var(--accent);margin-top:10px;font-size:18px;">J.A.R.V.I.S.</div>
+    <div id="status">ALL SYSTEMS NOMINAL</div>
+
+    <div class="apps-grid">
+      <button onclick="run('time')">TIME</button>
+      <button onclick="run('scan')">SCAN</button>
+      <button onclick="run('apps')">APPS</button>
+      <button onclick="run('files')">FILES</button>
+      <button onclick="run('theme')">THEME</button>
+      <button onclick="run('help')">HELP</button>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN (COMMAND CONSOLE) -->
+  <div class="panel">
+    <h2><span>COMMAND CONSOLE</span> <span id="op-id" style="font-size:10px;color:var(--dim);font-weight:normal;"></span></h2>
+    <div id="log"></div>
+
+    <div id="confirm-banner">
+      <div id="confirm-text" style="color:#ffcccc;font-weight:bold;">CONFIRMATION REQUIRED</div>
+      <div class="btns">
+        <button class="btn-yes" onclick="submitConfirmation(true)">CONFIRM</button>
+        <button onclick="submitConfirmation(false)">CANCEL</button>
+      </div>
+    </div>
+
+    <div id="in">
+      <input id="cmd" placeholder="Type a command or query…" autocomplete="off">
+      <button id="mic" title="Voice Input">MIC</button>
+      <button id="vox" title="Voice Replies">VOX</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/jarvis.js"></script>
+</body>
+</html>

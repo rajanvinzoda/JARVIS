@@ -1,10 +1,11 @@
 """
-J.A.R.V.I.S. OS AI Brain and Tool Orchestration Layer
-Communicates with BluesMinds API, executes controlled local tools,
-and maintains JARVIS personality and conversational context.
+J.A.R.V.I.S. OS AI Brain & Tool Orchestration Layer
+Communicates with BluesMinds API, executes validated local tools,
+and maintains JARVIS personality, privacy, and conversational context.
 """
 
 import os
+import re
 import json
 import urllib.request
 import urllib.error
@@ -12,48 +13,55 @@ try:
     import requests
 except ImportError:
     requests = None
+
 from backend.config import BLUESMINDS_API_KEY, BLUESMINDS_API_BASE, DEFAULT_MODEL
-from backend.tools.system import get_system_diagnostics
-from backend.tools.files import (
-    list_files, read_file, create_file, write_file, append_file,
-    rename_file, copy_file, move_file, delete_file
+from backend.security import generate_operation_id
+from backend.tools.system import (
+    get_time, get_date, get_system_diagnostics, get_battery,
+    get_network_info, get_gpu_info, list_processes
 )
-from backend.tools.applications import open_application, get_registered_applications
+from backend.tools.files import (
+    list_files, search_files, read_file, create_file, write_file,
+    append_file, rename_file, copy_file, move_file, delete_file, permanent_delete
+)
+from backend.tools.apps import open_application, close_application
+from backend.tools.windows import (
+    lock_computer, shutdown_computer, restart_computer, sleep_computer,
+    get_clipboard, set_clipboard
+)
 from backend.tools.web import open_url, search_web
-from backend.memory import set_fact, get_fact, get_all_facts, append_to_notes
+from backend.memory import set_fact, get_fact, get_all_facts, append_to_notes, log_action
 
-SYSTEM_PROMPT = """You are J.A.R.V.I.S., an advanced personal computer assistant running locally on the user's Windows computer.
+# System Prompt conforming strictly to Specification Section 51
+SYSTEM_PROMPT = """You are J.A.R.V.I.S., a local Windows AI assistant.
+You are the reasoning and conversational layer of a locally controlled assistant.
+You do not directly control Windows.
+You may only interact with the computer through explicitly provided tools.
+Never invent tool results.
+Never claim an operation succeeded unless the backend tool reports success.
+Never generate or execute arbitrary shell commands.
+Never bypass filesystem restrictions.
+Never access unauthorized paths.
+Never bypass confirmation requirements.
+Destructive operations require explicit user confirmation.
+Use deterministic local tools instead of AI reasoning when possible.
+If a requested operation is unavailable, explain that clearly.
+If the backend reports an error, accurately communicate the error.
+Be concise, calm, precise, professional, and slightly witty.
+Address the user naturally as 'sir'.
+Do not expose secrets, API keys, internal credentials, or private configuration.
+When an operation requires confirmation, stop and wait for the user's explicit confirmation."""
 
-Address the user as "sir" naturally, but do not overuse it.
-
-Your personality is:
-- Intelligent, calm, precise, professional, slightly witty, concise by default, helpful, and technically competent.
-- You are directly connected to the user's local Windows workstation via local backend tools.
-
-CRITICAL RULES:
-1. Never claim that an action was completed unless the backend tool confirms successful execution.
-2. Never invent system statistics, battery percentages, or network speeds. Always use real tool diagnostics.
-3. Never invent file contents or directory structures.
-4. Never pretend to have opened, created, modified, deleted, or launched something unless the corresponding tool returned success.
-5. When a tool fails or an error is returned, honestly explain the failure without blaming the user.
-6. For potentially destructive actions (such as delete_file or overwrite), the backend will signal that user confirmation is required.
-7. Keep responses concise, elegant, and punchy.
-"""
-
-# Tool schemas adhering to OpenAI function calling standard
 TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "Lists files and subfolders in an allowed directory (desktop, documents, downloads, or sandbox).",
+            "description": "Lists items in an authorized directory (desktop, documents, downloads, sandbox).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "folder_path": {
-                        "type": "string",
-                        "description": "Directory to list, e.g. 'desktop', 'documents', 'downloads', 'sandbox', or relative subfolder."
-                    }
+                    "folder_path": {"type": "string", "description": "Target folder name or path."}
                 },
                 "required": ["folder_path"]
             }
@@ -62,15 +70,27 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "read_file",
-            "description": "Reads text content from a permitted file on the user's system.",
+            "name": "search_files",
+            "description": "Searches for files matching a filename query in permitted folders.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to file, e.g. 'desktop/timetable.py' or 'documents/notes.txt'."
-                    }
+                    "folder_path": {"type": "string", "description": "Folder to search in."},
+                    "query": {"type": "string", "description": "Search term."}
+                },
+                "required": ["folder_path", "query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Reads text content from an authorized file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "File path to read."}
                 },
                 "required": ["file_path"]
             }
@@ -80,18 +100,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "create_file",
-            "description": "Creates a new text file at the specified location within permitted directories.",
+            "description": "Creates a new file in permitted directories.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path of file to create, e.g. 'desktop/ideas.txt'."
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Initial text content to write into the file."
-                    }
+                    "file_path": {"type": "string", "description": "File path to create."},
+                    "content": {"type": "string", "description": "Content to write into the file."}
                 },
                 "required": ["file_path", "content"]
             }
@@ -101,12 +115,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Writes or replaces text content in a file. If file already exists and has data, confirmation will be required.",
+            "description": "Overwrites an existing file. Requires confirmation if file has contents.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Target file path."},
-                    "content": {"type": "string", "description": "New content to write."}
+                    "content": {"type": "string", "description": "New content."}
                 },
                 "required": ["file_path", "content"]
             }
@@ -116,7 +130,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "append_file",
-            "description": "Appends text to an existing file without deleting current contents.",
+            "description": "Appends text to a file without overwriting current data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -131,11 +145,25 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Requests deletion of a file or folder. Requires user confirmation before execution.",
+            "description": "Moves a file or folder to the Recycle Bin. Requires user confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Path to the item to delete."}
+                    "file_path": {"type": "string", "description": "Item path to delete."}
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "permanent_delete",
+            "description": "Permanently deletes a file. Strongly destructive. Requires explicit confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Item path to permanently erase."}
                 },
                 "required": ["file_path"]
             }
@@ -145,30 +173,107 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "open_application",
-            "description": "Launches an authorized Windows application from the safe registry (chrome, edge, vscode, notepad, calculator, explorer, terminal, settings, paint, taskmgr).",
+            "description": "Launches an authorized application (notepad, calculator, chrome, edge, vscode, explorer, terminal, settings, paint, taskmgr, spotify, discord).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "app_key": {
-                        "type": "string",
-                        "description": "Key or common name of the application, e.g. 'vscode', 'chrome', 'calculator'."
-                    }
+                    "app_name": {"type": "string", "description": "Name or alias of application to open."}
                 },
-                "required": ["app_key"]
+                "required": ["app_name"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "open_url",
-            "description": "Opens a website URL in the user's default browser.",
+            "name": "close_application",
+            "description": "Closes an authorized application. Requires confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Full URL to open."}
+                    "app_name": {"type": "string", "description": "Name of application to close."}
                 },
-                "required": ["url"]
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "Retrieves real hardware statistics (CPU %, RAM %, Disk %, Network, Battery).",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": "Retrieves the top active processes by CPU and memory consumption.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lock_computer",
+            "description": "Instantly locks the Windows workstation.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shutdown_computer",
+            "description": "Shuts down the computer. Highly dangerous. Requires confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restart_computer",
+            "description": "Reboots the computer. Highly dangerous. Requires confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_clipboard",
+            "description": "Retrieves text currently in the system clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_clipboard",
+            "description": "Copies text to the system clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to copy."}
+                },
+                "required": ["text"]
             }
         }
     },
@@ -176,7 +281,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Performs a Google search for the query.",
+            "description": "Searches the web using Google.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -189,11 +294,14 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "get_system_info",
-            "description": "Retrieves real hardware metrics (CPU load, RAM usage, disk, network, battery status, OS version).",
+            "name": "open_url",
+            "description": "Opens a validated URL in the default browser.",
             "parameters": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "url": {"type": "string", "description": "URL to open."}
+                },
+                "required": ["url"]
             }
         }
     },
@@ -201,12 +309,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "remember_fact",
-            "description": "Saves a preference, project name, or fact into persistent assistant memory.",
+            "description": "Saves a fact, preference, or project location in SQLite persistent memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Fact identifier or subject."},
-                    "value": {"type": "string", "description": "Fact detail to remember."}
+                    "key": {"type": "string", "description": "Identifier for the fact."},
+                    "value": {"type": "string", "description": "Detail to remember."}
                 },
                 "required": ["key", "value"]
             }
@@ -216,11 +324,11 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "add_to_notes",
-            "description": "Appends a new line or note to the user's active scratchpad notes.",
+            "description": "Appends a note to the user's HUD scratchpad.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "note_text": {"type": "string", "description": "The note text to append."}
+                    "note_text": {"type": "string", "description": "Note content to append."}
                 },
                 "required": ["note_text"]
             }
@@ -252,88 +360,137 @@ def http_post(url: str, headers: dict, payload: dict, timeout: int = 20):
                 body = {}
             return e.code, body
 
-def execute_tool(tool_name: str, args: dict):
+def execute_tool(tool_name: str, args: dict, op_id: str, user_query: str) -> dict:
+    """Dispatches tool execution and logs audit record in SQLite."""
+    res = {}
+    try:
+        if tool_name == "list_files":
+            res = list_files(args.get("folder_path") or args.get("folder") or "desktop")
+        elif tool_name == "search_files":
+            res = search_files(args.get("folder_path", "desktop"), args.get("query", ""))
+        elif tool_name == "read_file":
+            res = read_file(args.get("file_path") or args.get("path"))
+        elif tool_name == "create_file":
+            res = create_file(args.get("file_path") or args.get("path"), args.get("content", ""))
+        elif tool_name == "write_file":
+            res = write_file(args.get("file_path") or args.get("path"), args.get("content", ""))
+        elif tool_name == "append_file":
+            res = append_file(args.get("file_path") or args.get("path"), args.get("content", ""))
+        elif tool_name == "delete_file":
+            res = delete_file(args.get("file_path") or args.get("path"))
+        elif tool_name == "permanent_delete":
+            res = permanent_delete(args.get("file_path") or args.get("path"))
+        elif tool_name == "open_application":
+            res = open_application(args.get("app_name") or args.get("app_key") or args.get("app"))
+        elif tool_name == "close_application":
+            res = close_application(args.get("app_name") or args.get("app_key") or args.get("app"))
+        elif tool_name == "get_system_info":
+            res = get_system_diagnostics()
+        elif tool_name == "list_processes":
+            res = list_processes()
+        elif tool_name == "lock_computer":
+            res = lock_computer()
+        elif tool_name == "shutdown_computer":
+            res = shutdown_computer()
+        elif tool_name == "restart_computer":
+            res = restart_computer()
+        elif tool_name == "sleep_computer":
+            res = sleep_computer()
+        elif tool_name == "get_clipboard":
+            res = get_clipboard()
+        elif tool_name == "set_clipboard":
+            res = set_clipboard(args.get("text", ""))
+        elif tool_name == "open_url":
+            res = open_url(args.get("url", ""))
+        elif tool_name == "search_web":
+            res = search_web(args.get("query", ""))
+        elif tool_name == "remember_fact":
+            res = set_fact(args.get("key"), args.get("value"))
+        elif tool_name == "add_to_notes":
+            res = append_to_notes(args.get("note_text", ""))
+        else:
+            res = {"success": False, "error": f"Unknown tool: {tool_name}"}
+    except Exception as e:
+        res = {"success": False, "error": str(e)}
+
+    # Record in SQLite audit log
+    status = "CONFIRMATION_PENDING" if res.get("requires_confirmation") else ("SUCCESS" if res.get("success", True) else "FAILED")
+    log_action(op_id, tool_name, args, status, res, user_query)
+    return res
+
+def process_deterministic_command(user_message: str):
     """
-    Safely dispatches tool invocation to the respective backend subsystem.
+    Checks if query can be answered deterministically without calling BluesMinds.
+    Saves API costs, reduces latency, and guarantees offline functionality.
     """
-    if tool_name == "list_files":
-        folder = args.get("folder_path") or args.get("folder") or "desktop"
-        return list_files(folder)
+    low = re.sub(r"[?!.]+$", "", user_message.strip().lower())
 
-    elif tool_name == "read_file":
-        path = args.get("file_path") or args.get("path")
-        return read_file(path)
+    if low in ["time", "what time is it", "what's the time"]:
+        return {"response": f"It is currently {get_time()}, sir.", "deterministic": True}
 
-    elif tool_name == "create_file":
-        path = args.get("file_path") or args.get("path")
-        content = args.get("content", "")
-        return create_file(path, content)
+    if low in ["date", "what is today's date", "what's the date", "today's date"]:
+        return {"response": f"Today is {get_date()}, sir.", "deterministic": True}
 
-    elif tool_name == "write_file":
-        path = args.get("file_path") or args.get("path")
-        content = args.get("content", "")
-        return write_file(path, content)
+    if low in ["status", "system status", "health"]:
+        diag = get_system_diagnostics()
+        cpu = diag["cpu"]["percent"]
+        mem = diag["memory"]["percent"]
+        bat = diag["battery"]["status_text"]
+        return {
+            "response": f"All core systems nominal, sir. Core load is at {cpu}%, memory at {mem}%, power status: {bat}.",
+            "deterministic": True
+        }
 
-    elif tool_name == "append_file":
-        path = args.get("file_path") or args.get("path")
-        content = args.get("content", "")
-        return append_file(path, content)
+    if low in ["battery", "what's my battery", "how much battery"]:
+        b = get_battery()
+        return {"response": f"Device power is currently at {b['status_text']}, sir.", "deterministic": True}
 
-    elif tool_name == "delete_file":
-        path = args.get("file_path") or args.get("path")
-        return delete_file(path)
+    if low in ["clipboard", "what's on my clipboard"]:
+        cb = get_clipboard()
+        txt = cb.get("text", "")
+        return {
+            "response": f"Your clipboard currently contains:\n\"{txt}\"" if txt else "Your clipboard is currently empty, sir.",
+            "deterministic": True
+        }
 
-    elif tool_name == "open_application":
-        app_key = args.get("app_key") or args.get("app")
-        return open_application(app_key)
+    return None
 
-    elif tool_name == "open_url":
-        url = args.get("url")
-        return open_url(url)
-
-    elif tool_name == "search_web":
-        query = args.get("query")
-        return search_web(query)
-
-    elif tool_name == "get_system_info":
-        return get_system_diagnostics()
-
-    elif tool_name == "remember_fact":
-        return set_fact(args.get("key"), args.get("value"))
-
-    elif tool_name == "add_to_notes":
-        return append_to_notes(args.get("note_text"))
-
-    return {"error": f"Unknown tool: {tool_name}"}
-
-def process_chat_message(user_message: str, history: list = None, model: str = None):
+def process_chat_message(user_message: str, history: list = None, model: str = None) -> dict:
     """
-    Full AI reasoning & tool-orchestration loop.
-    Supports multi-turn context and handles tool execution feedback.
+    Primary AI reasoning & tool-orchestration pipeline.
     """
+    op_id = generate_operation_id()
+
+    # 1. Check deterministic local shortcut
+    det_result = process_deterministic_command(user_message)
+    if det_result:
+        return {
+            "response": det_result["response"],
+            "operation_id": op_id,
+            "action": None,
+            "deterministic": True
+        }
+
     api_key = BLUESMINDS_API_KEY or os.getenv("BLUESMINDS_API_KEY", "")
     target_model = model or DEFAULT_MODEL
 
-    # If no API key configured, use local deterministic fallback
+    # 2. Check offline state
     if not api_key:
         return {
-            "response": "AI services are currently unavailable, sir (BLUESMINDS_API_KEY not configured). Local systems remain operational.",
-            "action": None
+            "response": "NEURAL LINK: OFFLINE. AI services currently unavailable (BLUESMINDS_API_KEY not configured). Local systems remain operational, sir.",
+            "operation_id": op_id,
+            "action": None,
+            "offline": True
         }
 
-    # Construct messages array
+    # Construct system and memory context
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    # Add recent memory facts context
     facts = get_all_facts()
     if facts:
-        fact_summary = ", ".join([f"{k}: {v.get('value')}" for k, v in facts.items()])
-        messages.append({
-            "role": "system",
-            "content": f"Saved Memory Context: {fact_summary}"
-        })
+        fact_str = ", ".join([f"{k}: {v['value']}" for k, v in list(facts.items())[:10]])
+        messages.append({"role": "system", "content": f"Stored Memory Context: {fact_str}"})
 
-    # Add limited conversation history (last 6 turns)
+    # Add limited history
     if history:
         for h in history[-6:]:
             if "role" in h and "content" in h:
@@ -347,9 +504,6 @@ def process_chat_message(user_message: str, history: list = None, model: str = N
         "Content-Type": "application/json"
     }
 
-    executed_actions = []
-    requires_confirmation = None
-
     try:
         payload = {
             "model": target_model,
@@ -360,27 +514,28 @@ def process_chat_message(user_message: str, history: list = None, model: str = N
         }
 
         status_code, res_json = http_post(url, headers, payload, timeout=20)
-        
         if status_code != 200:
             return {
-                "response": f"AI uplink returned status {status_code}, sir. Local systems remain operational.",
+                "response": f"NEURAL LINK: STATUS {status_code}. Unable to reach AI distributor, sir. Local core remains active.",
+                "operation_id": op_id,
                 "action": None
             }
+
         choice = res_json.get("choices", [{}])[0]
         msg = choice.get("message", {})
-
-        # Check for tool calls
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
-            # Model responded with direct text
             return {
                 "response": msg.get("content") or "At your service, sir.",
+                "operation_id": op_id,
                 "action": None
             }
 
-        # Model requested tool execution
+        # Handle tool calls
         tool_messages = [msg]
+        executed_actions = []
+        requires_confirmation = None
 
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -390,15 +545,9 @@ def process_chat_message(user_message: str, history: list = None, model: str = N
             except Exception:
                 args = {}
 
-            # Execute tool
-            tool_output = execute_tool(name, args)
-            executed_actions.append({
-                "tool": name,
-                "args": args,
-                "result": tool_output
-            })
+            tool_output = execute_tool(name, args, op_id, user_message)
+            executed_actions.append({"tool": name, "args": args, "result": tool_output})
 
-            # Check if tool requires explicit user confirmation
             if isinstance(tool_output, dict) and tool_output.get("requires_confirmation"):
                 requires_confirmation = tool_output
 
@@ -411,26 +560,24 @@ def process_chat_message(user_message: str, history: list = None, model: str = N
         if requires_confirmation:
             final_text = requires_confirmation.get("prompt") or "That is a destructive operation, sir. I require your explicit authorization before proceeding."
         else:
-            # Send tool output back to model for natural language synthesis
-            followup_messages = messages + tool_messages
             followup_payload = {
                 "model": target_model,
-                "messages": followup_messages,
+                "messages": messages + tool_messages,
                 "temperature": 0.3
             }
-
-            followup_status, final_json = http_post(url, headers, followup_payload, timeout=20)
-            if followup_status == 200:
-                content = final_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+            f_status, f_json = http_post(url, headers, followup_payload, timeout=20)
+            if f_status == 200:
+                content = f_json.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if content and not content.strip().startswith(("{", "[")):
                     final_text = content
                 else:
                     final_text = "Action executed successfully, sir."
             else:
-                final_text = f"Action executed successfully, sir."
+                final_text = "Action completed, sir."
 
         return {
-            "response": final_text or "Action processed, sir.",
+            "response": final_text,
+            "operation_id": op_id,
             "action": executed_actions[-1] if executed_actions else None,
             "actions": executed_actions,
             "requires_confirmation": requires_confirmation
@@ -438,13 +585,15 @@ def process_chat_message(user_message: str, history: list = None, model: str = N
 
     except (TimeoutError, urllib.error.URLError) as e:
         return {
-            "response": "AI services request timed out or connection failed, sir. Local subsystems remain fully responsive.",
-            "error": str(e),
-            "action": None
+            "response": "NEURAL LINK: TIMEOUT. AI request timed out, sir. Local core subsystems remain active.",
+            "operation_id": op_id,
+            "action": None,
+            "error": str(e)
         }
     except Exception as e:
         return {
-            "response": f"Encountered an anomaly in neural processing, sir. Local subsystems remain operational.",
-            "error": str(e),
-            "action": None
+            "response": f"Neural processor reported an anomaly ({str(e)}), sir. Local tools remain operational.",
+            "operation_id": op_id,
+            "action": None,
+            "error": str(e)
         }

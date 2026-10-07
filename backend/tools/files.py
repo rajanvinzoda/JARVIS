@@ -7,70 +7,22 @@ and user-confirmed destructive safety protocols.
 import os
 import shutil
 import time
-import uuid
 from pathlib import Path
-from backend.config import ALLOWED_DIRECTORIES
+from backend.security import (
+    resolve_secure_path,
+    is_binary_file,
+    create_confirmation_request,
+    MAX_READ_BYTES,
+    SecurityError
+)
+from backend.config import ALLOWED_DIRECTORIES, DATA_DIR
 
-# Allowed text extensions for safe reading
-READABLE_EXTENSIONS = {
-    ".txt", ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css",
-    ".json", ".csv", ".md", ".log", ".xml", ".yaml", ".yml", ".ini",
-    ".bat", ".sh", ".sql", ".env.example", ".conf"
-}
+# Dedicated recycle/trash folder in data for soft deletion
+RECYCLE_BIN = DATA_DIR / "recycle_bin"
+RECYCLE_BIN.mkdir(parents=True, exist_ok=True)
 
-# In-memory pending confirmation registry
-PENDING_CONFIRMATIONS = {}
-
-class FileSecurityError(Exception):
-    pass
-
-def resolve_secure_path(input_path: str) -> Path:
-    """
-    Validates that a path resides within one of the ALLOWED_DIRECTORIES.
-    Supports shorthand folder names: 'desktop', 'documents', 'downloads', 'sandbox'.
-    Prevents path traversal and unauthorized directory escapes.
-    """
-    if not input_path or not input_path.strip():
-        raise FileSecurityError("No path specified.")
-
-    clean_path = input_path.strip().replace('"', '').replace("'", "")
-    
-    # Check if user passed shorthand root e.g. "desktop/test.py" or "desktop"
-    parts = clean_path.replace("\\", "/").split("/")
-    first_part = parts[0].lower()
-    
-    target_path = None
-    if first_part in ALLOWED_DIRECTORIES:
-        base_dir = ALLOWED_DIRECTORIES[first_part]
-        sub_path = "/".join(parts[1:])
-        target_path = (base_dir / sub_path).resolve()
-    else:
-        # Check if it's already an absolute path
-        candidate = Path(clean_path).expanduser().resolve()
-        target_path = candidate
-
-    # Strict boundary validation: target must be inside at least one allowed directory
-    allowed = False
-    for name, root in ALLOWED_DIRECTORIES.items():
-        try:
-            target_path.relative_to(root)
-            allowed = True
-            break
-        except ValueError:
-            continue
-
-    if not allowed:
-        allowed_names = ", ".join(ALLOWED_DIRECTORIES.keys())
-        raise FileSecurityError(
-            f"Access Denied: Path '{clean_path}' is outside permitted directories ({allowed_names})."
-        )
-
-    return target_path
-
-def list_files(folder_path: str = "desktop"):
-    """
-    Lists files and directories inside an allowed directory.
-    """
+def list_files(folder_path: str = "desktop") -> dict:
+    """Lists files and directories inside an authorized directory."""
     try:
         resolved = resolve_secure_path(folder_path)
         if not resolved.exists():
@@ -93,122 +45,144 @@ def list_files(folder_path: str = "desktop"):
             except Exception:
                 continue
 
-        # Sort folders first, then files
         items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"].lower()))
         return {
             "success": True,
-            "directory": str(resolved),
-            "folder_name": resolved.name,
+            "tool": "list_files",
+            "directory": resolved.name,
             "total_items": len(items),
             "items": items
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "list_files", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to list directory: {str(e)}"}
+        return {"success": False, "tool": "list_files", "error": f"Directory access error: {str(e)}"}
 
-def read_file(file_path: str):
-    """
-    Reads text content from permitted files. Returns metadata for binaries.
-    """
+def search_files(folder_path: str = "desktop", query: str = "") -> dict:
+    """Searches for files matching a query within an authorized directory."""
+    try:
+        resolved = resolve_secure_path(folder_path)
+        if not resolved.exists() or not resolved.is_dir():
+            return {"success": False, "error": f"Invalid search directory: {folder_path}"}
+
+        q = query.strip().lower()
+        matches = []
+        for root, dirs, files in os.walk(resolved):
+            # Bound search depth
+            rel = Path(root).relative_to(resolved)
+            if len(rel.parts) > 4:
+                continue
+            for f in files:
+                if q in f.lower():
+                    fp = Path(root) / f
+                    try:
+                        st = fp.stat()
+                        matches.append({
+                            "name": f,
+                            "relative_path": str(fp.relative_to(resolved)),
+                            "size_bytes": st.st_size,
+                            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+                        })
+                    except Exception:
+                        pass
+
+        return {
+            "success": True,
+            "tool": "search_files",
+            "query": query,
+            "directory": resolved.name,
+            "matches_count": len(matches),
+            "matches": matches[:30]
+        }
+    except SecurityError as e:
+        return {"success": False, "tool": "search_files", "error": str(e)}
+    except Exception as e:
+        return {"success": False, "tool": "search_files", "error": f"Search failed: {str(e)}"}
+
+def read_file(file_path: str) -> dict:
+    """Reads text content from permitted files. Returns metadata for binaries or oversized files."""
     try:
         resolved = resolve_secure_path(file_path)
         if not resolved.exists():
-            return {"success": False, "error": f"File '{resolved.name}' not found."}
+            return {"success": False, "tool": "read_file", "error": f"File '{resolved.name}' not found."}
         if not resolved.is_file():
-            return {"success": False, "error": f"'{resolved.name}' is a directory, not a file."}
+            return {"success": False, "tool": "read_file", "error": f"'{resolved.name}' is a directory, not a file."}
 
-        suffix = resolved.suffix.lower()
         stat = resolved.stat()
 
-        if suffix not in READABLE_EXTENSIONS and suffix != "":
+        # Binary check
+        if is_binary_file(resolved):
             return {
                 "success": True,
+                "tool": "read_file",
                 "is_binary": True,
-                "message": f"File '{resolved.name}' is a binary format ({suffix}). Reading metadata only.",
+                "filename": resolved.name,
                 "size_bytes": stat.st_size,
+                "size_display": f"{round(stat.st_size / 1024, 1)} KB",
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
-                "path": str(resolved)
+                "message": f"File '{resolved.name}' is a binary format ({resolved.suffix}). Inspecting metadata only."
             }
 
-        # Safe size limit for reading text (max 2 MB)
-        if stat.st_size > 2 * 1024 * 1024:
-            return {"success": False, "error": f"File '{resolved.name}' is too large to read into context (>2MB)."}
+        # Size check
+        if stat.st_size > MAX_READ_BYTES:
+            return {
+                "success": False,
+                "tool": "read_file",
+                "error": f"File '{resolved.name}' exceeds the 5MB safety limit ({round(stat.st_size / (1024*1024), 2)} MB). Direct reading restricted."
+            }
 
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
         return {
             "success": True,
+            "tool": "read_file",
             "filename": resolved.name,
-            "path": str(resolved),
             "size_bytes": stat.st_size,
             "content": content
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "read_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to read file: {str(e)}"}
+        return {"success": False, "tool": "read_file", "error": f"Read error: {str(e)}"}
 
-def create_file(file_path: str, content: str = ""):
-    """
-    Creates a new file. If the file already exists, requests confirmation or prevents overwrite.
-    """
+def create_file(file_path: str, content: str = "") -> dict:
+    """Creates a new file. If the file already exists, requests user confirmation to overwrite."""
     try:
         resolved = resolve_secure_path(file_path)
         if resolved.exists():
-            # Trigger confirmation to prevent accidental overwrite
-            confirmation_id = str(uuid.uuid4())[:8]
-            PENDING_CONFIRMATIONS[confirmation_id] = {
-                "action": "overwrite_file",
-                "path": str(resolved),
-                "content": content,
-                "created_at": time.time()
-            }
-            return {
-                "requires_confirmation": True,
-                "confirmation_id": confirmation_id,
-                "action": "overwrite_file",
-                "prompt": f"File '{resolved.name}' already exists. Overwriting will replace existing contents. Shall I proceed, sir?",
-                "path": str(resolved)
-            }
+            return create_confirmation_request(
+                tool_name="write_file",
+                params={"path": str(resolved), "content": content},
+                prompt=f"File '{resolved.name}' already exists. Overwriting will replace existing data. Shall I proceed, sir?"
+            )
 
-        # Create parent directories if needed
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
 
         return {
             "success": True,
-            "message": f"File '{resolved.name}' created successfully.",
-            "path": str(resolved)
+            "tool": "create_file",
+            "filename": resolved.name,
+            "path": str(resolved),
+            "message": f"File '{resolved.name}' has been created successfully, sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "create_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to create file: {str(e)}"}
+        return {"success": False, "tool": "create_file", "error": f"Creation failed: {str(e)}"}
 
-def write_file(file_path: str, content: str):
-    """
-    Writes/replaces content in an existing or new file with confirmation if file has content.
-    """
+def write_file(file_path: str, content: str = "") -> dict:
+    """Writes content to a file. Requires confirmation if overwriting existing content."""
     try:
         resolved = resolve_secure_path(file_path)
         if resolved.exists() and resolved.stat().st_size > 0:
-            confirmation_id = str(uuid.uuid4())[:8]
-            PENDING_CONFIRMATIONS[confirmation_id] = {
-                "action": "overwrite_file",
-                "path": str(resolved),
-                "content": content,
-                "created_at": time.time()
-            }
-            return {
-                "requires_confirmation": True,
-                "confirmation_id": confirmation_id,
-                "action": "overwrite_file",
-                "prompt": f"Updating '{resolved.name}' will overwrite existing data ({resolved.stat().st_size} bytes). Confirm execution, sir?",
-                "path": str(resolved)
-            }
+            return create_confirmation_request(
+                tool_name="write_file",
+                params={"path": str(resolved), "content": content},
+                prompt=f"Updating '{resolved.name}' will overwrite existing contents ({resolved.stat().st_size} bytes). Confirm execution, sir?"
+            )
 
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with open(resolved, "w", encoding="utf-8") as f:
@@ -216,18 +190,17 @@ def write_file(file_path: str, content: str):
 
         return {
             "success": True,
-            "message": f"File '{resolved.name}' updated successfully.",
-            "path": str(resolved)
+            "tool": "write_file",
+            "filename": resolved.name,
+            "message": f"File '{resolved.name}' updated successfully, sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "write_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to write file: {str(e)}"}
+        return {"success": False, "tool": "write_file", "error": f"Write failed: {str(e)}"}
 
-def append_file(file_path: str, content: str):
-    """
-    Appends content to a file without destroying existing contents.
-    """
+def append_file(file_path: str, content: str) -> dict:
+    """Appends content to an existing file without modifying previous data."""
     try:
         resolved = resolve_secure_path(file_path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -236,49 +209,47 @@ def append_file(file_path: str, content: str):
 
         return {
             "success": True,
-            "message": f"Appended content to '{resolved.name}'.",
-            "path": str(resolved)
+            "tool": "append_file",
+            "filename": resolved.name,
+            "message": f"Appended text to '{resolved.name}', sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "append_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to append to file: {str(e)}"}
+        return {"success": False, "tool": "append_file", "error": f"Append failed: {str(e)}"}
 
-def rename_file(old_path: str, new_path: str):
-    """
-    Renames a file or directory within permitted boundaries.
-    """
+def rename_file(old_path: str, new_path: str) -> dict:
+    """Renames a file or folder within authorized directories."""
     try:
         source = resolve_secure_path(old_path)
         dest = resolve_secure_path(new_path)
 
         if not source.exists():
-            return {"success": False, "error": f"Source item '{source.name}' not found."}
+            return {"success": False, "tool": "rename_file", "error": f"Source item '{source.name}' does not exist."}
         if dest.exists():
-            return {"success": False, "error": f"Destination item '{dest.name}' already exists."}
+            return {"success": False, "tool": "rename_file", "error": f"Destination item '{dest.name}' already exists."}
 
         source.rename(dest)
         return {
             "success": True,
-            "message": f"Renamed '{source.name}' to '{dest.name}'.",
-            "old_path": str(source),
-            "new_path": str(dest)
+            "tool": "rename_file",
+            "old_name": source.name,
+            "new_name": dest.name,
+            "message": f"Renamed '{source.name}' to '{dest.name}', sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "rename_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to rename: {str(e)}"}
+        return {"success": False, "tool": "rename_file", "error": f"Rename failed: {str(e)}"}
 
-def copy_file(source_path: str, dest_path: str):
-    """
-    Copies a file within permitted directories.
-    """
+def copy_file(source_path: str, dest_path: str) -> dict:
+    """Copies a file or directory within authorized boundaries."""
     try:
         src = resolve_secure_path(source_path)
         dst = resolve_secure_path(dest_path)
 
         if not src.exists():
-            return {"success": False, "error": f"Source item '{src.name}' not found."}
+            return {"success": False, "tool": "copy_file", "error": f"Source item '{src.name}' not found."}
 
         if src.is_dir():
             shutil.copytree(src, dst)
@@ -288,97 +259,119 @@ def copy_file(source_path: str, dest_path: str):
 
         return {
             "success": True,
-            "message": f"Successfully copied '{src.name}' to '{dst.name}'.",
-            "source": str(src),
-            "destination": str(dst)
+            "tool": "copy_file",
+            "source": src.name,
+            "destination": dst.name,
+            "message": f"Successfully copied '{src.name}' to '{dst.name}', sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "copy_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to copy: {str(e)}"}
+        return {"success": False, "tool": "copy_file", "error": f"Copy failed: {str(e)}"}
 
-def move_file(source_path: str, dest_path: str):
-    """
-    Moves a file within permitted directories.
-    """
+def move_file(source_path: str, dest_path: str) -> dict:
+    """Moves a file or folder within authorized boundaries."""
     try:
         src = resolve_secure_path(source_path)
         dst = resolve_secure_path(dest_path)
 
         if not src.exists():
-            return {"success": False, "error": f"Source item '{src.name}' not found."}
+            return {"success": False, "tool": "move_file", "error": f"Source item '{src.name}' not found."}
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
 
         return {
             "success": True,
-            "message": f"Successfully moved '{src.name}' to '{dst.name}'.",
-            "source": str(src),
-            "destination": str(dst)
+            "tool": "move_file",
+            "source": src.name,
+            "destination": dst.name,
+            "message": f"Successfully moved '{src.name}' to '{dst.name}', sir."
         }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+    except SecurityError as e:
+        return {"success": False, "tool": "move_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed to move: {str(e)}"}
+        return {"success": False, "tool": "move_file", "error": f"Move failed: {str(e)}"}
 
-def delete_file(file_path: str):
+def delete_file(file_path: str) -> dict:
     """
-    DESTRUCTIVE ACTION: Files are NEVER deleted without user confirmation.
-    Returns requires_confirmation and generates a confirmation token.
+    Normal deletion: moves file to the recycle bin / local trash folder.
+    Requires user confirmation!
     """
     try:
         resolved = resolve_secure_path(file_path)
         if not resolved.exists():
-            return {"success": False, "error": f"Item '{resolved.name}' not found."}
+            return {"success": False, "tool": "delete_file", "error": f"Item '{resolved.name}' not found."}
 
-        confirmation_id = str(uuid.uuid4())[:8]
-        PENDING_CONFIRMATIONS[confirmation_id] = {
-            "action": "delete_file",
-            "path": str(resolved),
-            "is_dir": resolved.is_dir(),
-            "created_at": time.time()
-        }
-
-        return {
-            "requires_confirmation": True,
-            "confirmation_id": confirmation_id,
-            "action": "delete_file",
-            "prompt": f"Permanently deleting '{resolved.name}' cannot be undone. Shall I proceed, sir?",
-            "path": str(resolved)
-        }
-    except FileSecurityError as e:
-        return {"success": False, "error": str(e)}
+        return create_confirmation_request(
+            tool_name="delete_file",
+            params={"path": str(resolved), "is_dir": resolved.is_dir(), "permanent": False},
+            prompt=f"Sir, this will move '{resolved.name}' to the Recycle Bin. Shall I proceed?"
+        )
+    except SecurityError as e:
+        return {"success": False, "tool": "delete_file", "error": str(e)}
     except Exception as e:
-        return {"success": False, "error": f"Failed: {str(e)}"}
+        return {"success": False, "tool": "delete_file", "error": f"Delete request failed: {str(e)}"}
 
-def confirm_action(confirmation_id: str, approved: bool):
+def permanent_delete(file_path: str) -> dict:
     """
-    Executes or cancels a queued destructive action.
+    Permanent deletion: destroys file immediately.
+    Requires STRONGER confirmation!
     """
-    item = PENDING_CONFIRMATIONS.pop(confirmation_id, None)
-    if not item:
-        return {"success": False, "error": "Invalid or expired confirmation request, sir."}
+    try:
+        resolved = resolve_secure_path(file_path)
+        if not resolved.exists():
+            return {"success": False, "tool": "permanent_delete", "error": f"Item '{resolved.name}' not found."}
 
-    if not approved:
-        return {"success": True, "message": "Operation cancelled as requested, sir."}
+        return create_confirmation_request(
+            tool_name="permanent_delete",
+            params={"path": str(resolved), "is_dir": resolved.is_dir(), "permanent": True},
+            prompt=f"WARNING: Permanently deleting '{resolved.name}' cannot be undone. Confirm permanent destruction, sir?"
+        )
+    except SecurityError as e:
+        return {"success": False, "tool": "permanent_delete", "error": str(e)}
+    except Exception as e:
+        return {"success": False, "tool": "permanent_delete", "error": f"Permanent delete request failed: {str(e)}"}
 
-    action = item.get("action")
-    target_path = Path(item["path"])
+def execute_confirmed_file_action(action_data: dict) -> dict:
+    """Executes a confirmed file action."""
+    tool = action_data.get("tool")
+    params = action_data.get("params", {})
+    target_path = Path(params["path"])
 
     try:
-        if action == "delete_file":
-            if item.get("is_dir"):
+        if tool == "delete_file":
+            # Soft delete: move to RECYCLE_BIN
+            timestamp = int(time.time())
+            trash_dest = RECYCLE_BIN / f"{timestamp}_{target_path.name}"
+            shutil.move(str(target_path), str(trash_dest))
+            return {
+                "success": True,
+                "tool": "delete_file",
+                "message": f"Moved '{target_path.name}' to the Recycle Bin, sir."
+            }
+
+        elif tool == "permanent_delete":
+            # Hard delete
+            if params.get("is_dir"):
                 shutil.rmtree(target_path)
             else:
                 target_path.unlink()
-            return {"success": True, "message": f"Successfully deleted '{target_path.name}', sir."}
+            return {
+                "success": True,
+                "tool": "permanent_delete",
+                "message": f"Permanently deleted '{target_path.name}', sir."
+            }
 
-        elif action == "overwrite_file":
+        elif tool == "write_file":
             with open(target_path, "w", encoding="utf-8") as f:
-                f.write(item.get("content", ""))
-            return {"success": True, "message": f"File '{target_path.name}' has been updated, sir."}
+                f.write(params.get("content", ""))
+            return {
+                "success": True,
+                "tool": "write_file",
+                "message": f"Successfully updated '{target_path.name}', sir."
+            }
 
-        return {"success": False, "error": f"Unknown action: {action}"}
+        return {"success": False, "error": f"Unknown confirmed action: {tool}"}
     except Exception as e:
         return {"success": False, "error": f"Execution failed: {str(e)}"}
