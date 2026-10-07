@@ -30,6 +30,10 @@ from backend.tools.windows import (
     lock_computer, shutdown_computer, restart_computer, sleep_computer,
     get_clipboard, set_clipboard, execute_confirmed_windows_action
 )
+from backend.tools.terminal import (
+    execute_terminal_command, start_terminal_console,
+    close_terminal_console, get_terminal_status
+)
 from backend.tools.web import open_url, search_web
 from backend.memory import (
     set_fact, get_all_facts, clear_all_memory, get_notes,
@@ -178,6 +182,25 @@ def api_apps_open():
 def api_apps_close():
     data = request.get_json() or {}
     return jsonify(close_application(data.get("app", "")))
+
+# Authoritative Terminal Automation Endpoints (Section 2 & 7)
+@app.route("/api/terminal/execute", methods=["POST"])
+def api_terminal_execute():
+    data = request.get_json() or {}
+    command = data.get("command", "").strip()
+    return jsonify(execute_terminal_command(command))
+
+@app.route("/api/terminal/start", methods=["POST"])
+def api_terminal_start():
+    return jsonify(start_terminal_console())
+
+@app.route("/api/terminal/close", methods=["POST"])
+def api_terminal_close():
+    return jsonify(close_terminal_console())
+
+@app.route("/api/terminal/status", methods=["GET"])
+def api_terminal_status():
+    return jsonify(get_terminal_status())
 
 # Windows System Subroutines
 @app.route("/api/windows/lock", methods=["POST"])

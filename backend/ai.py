@@ -31,15 +31,19 @@ from backend.tools.windows import (
 )
 from backend.tools.web import open_url, search_web
 from backend.memory import set_fact, get_fact, get_all_facts, append_to_notes, log_action
+from backend.tools.terminal import (
+    execute_terminal_command, start_terminal_console, close_terminal_console, get_terminal_status
+)
 
 # System Prompt conforming strictly to Specification Section 51
 SYSTEM_PROMPT = """You are J.A.R.V.I.S., a local Windows AI assistant.
 You are the reasoning and conversational layer of a locally controlled assistant.
 You do not directly control Windows.
 You may only interact with the computer through explicitly provided tools.
+When asked to run, type, or execute commands in CMD or the terminal, always use the execute_terminal_command tool.
 Never invent tool results.
 Never claim an operation succeeded unless the backend tool reports success.
-Never generate or execute arbitrary shell commands.
+Never generate or execute arbitrary background shell commands outside the controlled tools.
 Never bypass filesystem restrictions.
 Never access unauthorized paths.
 Never bypass confirmation requirements.
@@ -53,6 +57,34 @@ Do not expose secrets, API keys, internal credentials, or private configuration.
 When an operation requires confirmation, stop and wait for the user's explicit confirmation."""
 
 TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_terminal_command",
+            "description": "Visibly types and executes a shell command (such as 'echo Hello Sir', 'dir', 'python --version', 'whoami', 'ipconfig', 'mkdir Test') into the dedicated J.A.R.V.I.S. Command Prompt window. The user will visibly see the command typed and executed in the CMD window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The exact command to visibly type and execute in the CMD window, e.g. 'echo Hello Sir' or 'dir'."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_terminal_console",
+            "description": "Opens and brings to the foreground the dedicated visible J.A.R.V.I.S. Command Prompt window.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -380,6 +412,14 @@ def execute_tool(tool_name: str, args: dict, op_id: str, user_query: str) -> dic
             res = delete_file(args.get("file_path") or args.get("path"))
         elif tool_name == "permanent_delete":
             res = permanent_delete(args.get("file_path") or args.get("path"))
+        elif tool_name == "execute_terminal_command":
+            res = execute_terminal_command(args.get("command", ""))
+        elif tool_name == "start_terminal_console":
+            res = start_terminal_console()
+        elif tool_name == "close_terminal_console":
+            res = close_terminal_console()
+        elif tool_name == "get_terminal_status":
+            res = get_terminal_status()
         elif tool_name == "open_application":
             res = open_application(args.get("app_name") or args.get("app_key") or args.get("app"))
         elif tool_name == "close_application":
@@ -453,7 +493,91 @@ def process_deterministic_command(user_message: str):
             "deterministic": True
         }
 
+    # Explicit console lifecycle commands
+    if low in [
+        "open cmd", "open terminal", "launch cmd", "launch terminal",
+        "start console", "open command console", "show cmd", "focus cmd"
+    ]:
+        res = start_terminal_console()
+        return {
+            "response": res.get("message", "J.A.R.V.I.S. Command Console has been launched, sir."),
+            "action": {"tool": "start_terminal_console", "result": res},
+            "deterministic": True
+        }
+
+    if low in ["close cmd", "close terminal", "exit cmd", "close command console"]:
+        res = close_terminal_console()
+        return {
+            "response": res.get("message", "J.A.R.V.I.S. Command Console closed, sir."),
+            "action": {"tool": "close_terminal_console", "result": res},
+            "deterministic": True
+        }
+
+    # Enhanced natural language terminal command extraction
+    is_terminal_cmd, terminal_cmd_str = extract_terminal_intent(user_message)
+
+    if is_terminal_cmd and terminal_cmd_str:
+        exec_res = execute_terminal_command(terminal_cmd_str)
+        if exec_res.get("success"):
+            reply = f"Command '{terminal_cmd_str}' visibly typed and executed in J.A.R.V.I.S. Command Console, sir."
+            return {
+                "response": reply,
+                "action": {"tool": "execute_terminal_command", "args": {"command": terminal_cmd_str}, "result": exec_res},
+                "deterministic": True
+            }
+        else:
+            return {
+                "response": f"I couldn't execute the command in the Command Console, sir: {exec_res.get('error', 'Execution failed')}",
+                "action": {"tool": "execute_terminal_command", "args": {"command": terminal_cmd_str}, "result": exec_res},
+                "deterministic": True
+            }
+
     return None
+
+def extract_terminal_intent(user_message: str) -> tuple[bool, str]:
+    """
+    Parses natural language requests to type/run commands in CMD or the terminal.
+    Extracts the exact command to type into the visible CMD window.
+    """
+    raw = user_message.strip()
+    low = raw.lower()
+
+    # Pattern 1: Direct prefix forms like "type in cmd: echo test", "type in cmd echo test", "run in cmd dir", "cmd: dir"
+    patterns_prefix = [
+        r"^(?:please\s+)?(?:type|run|execute|write)\s+(?:in|into|to|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?[:\s]+(.+)$",
+        r"^(?:please\s+)?(?:in|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?[:\s]+(?:please\s+)?(?:type|run|execute|write)?[:\s]*(.+)$",
+        r"^(?:cmd|terminal)[:\s]+(.+)$",
+        r"^(?:open|launch|start)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?\s+(?:and|then)\s+(?:type|run|execute)\s+(.+)$",
+    ]
+    for pat in patterns_prefix:
+        m = re.match(pat, raw, re.IGNORECASE)
+        if m:
+            extracted = m.group(1).strip()
+            if (extracted.startswith('"') and extracted.endswith('"')) or (extracted.startswith("'") and extracted.endswith("'")):
+                extracted = extracted[1:-1].strip()
+            if extracted:
+                return True, extracted
+
+    # Pattern 2: Suffix forms like "type echo hello in cmd", "run dir in terminal", "execute python --version in cmd window"
+    pattern_suffix = r"^(?:please\s+)?(?:type|run|execute|write)\s+(.+?)\s+(?:in|into|to|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?$"
+    m_suf = re.match(pattern_suffix, raw, re.IGNORECASE)
+    if m_suf:
+        extracted = m_suf.group(1).strip()
+        if (extracted.startswith('"') and extracted.endswith('"')) or (extracted.startswith("'") and extracted.endswith("'")):
+            extracted = extracted[1:-1].strip()
+        if extracted:
+            return True, extracted
+
+    # Pattern 3: Explicit standard shell triggers when typed directly as a terminal command
+    shell_triggers = [
+        "echo ", "dir", "whoami", "ipconfig", "ping ", "python ",
+        "python.exe ", "node ", "git ", "mkdir ", "cd ", "type ", "cls"
+    ]
+    for st in shell_triggers:
+        if low == st.strip() or low.startswith(st):
+            return True, raw
+
+    return False, ""
 
 def process_chat_message(user_message: str, history: list = None, model: str = None) -> dict:
     """

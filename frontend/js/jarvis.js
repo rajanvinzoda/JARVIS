@@ -161,7 +161,25 @@ async function run(input) {
     return;
   }
   if (low === "help") {
-    return say("Available commands: time, date, scan, apps, files, theme, vox, clear, note <text>, calc <expr>, search <query>, or natural speech queries.");
+    return say("Available commands: time, date, scan, apps, files, cmd, theme, vox, clear, note <text>, calc <expr>, search <query>, or type 'run in cmd <command>' / speak freely.");
+  }
+  if (low === "cmd" || low === "open cmd" || low === "launch cmd") {
+    try {
+      const res = await fetch(`${API_BASE}/terminal/start`, { method: "POST" });
+      const d = await res.json();
+      return say(d.message || "Command Console launched, sir.");
+    } catch (e) {
+      return say("Failed to launch Command Console, sir.");
+    }
+  }
+  if (low === "close cmd" || low === "exit cmd") {
+    try {
+      const res = await fetch(`${API_BASE}/terminal/close`, { method: "POST" });
+      const d = await res.json();
+      return say(d.message || "Command Console closed, sir.");
+    } catch (e) {
+      return say("Failed to close Command Console, sir.");
+    }
   }
 
   // AI & Tool Backend Call

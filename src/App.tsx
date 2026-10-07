@@ -125,7 +125,7 @@ export default function App() {
 
   // Modals & Drawers
   const [activeModal, setActiveModal] = useState<
-    'none' | 'apps' | 'files' | 'agent' | 'help' | 'viewFile' | 'processes' | 'windows'
+    'none' | 'apps' | 'files' | 'agent' | 'help' | 'viewFile' | 'processes' | 'windows' | 'terminal'
   >('none');
   const [fileList, setFileList] = useState<FileItem[]>([]);
   const [currentFolder, setCurrentFolder] = useState('desktop');
@@ -138,6 +138,16 @@ export default function App() {
   const [processList, setProcessList] = useState<ProcessItem[]>([]);
   const [clipboardText, setClipboardText] = useState<string>('');
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmation | null>(null);
+
+  // Terminal Automation Subsystem State
+  const [terminalStatus, setTerminalStatus] = useState<{
+    alive: boolean;
+    hwnd?: string | null;
+    title?: string;
+    session_id?: string;
+  } | null>(null);
+  const [terminalCmdInput, setTerminalCmdInput] = useState('');
+  const [terminalExecuting, setTerminalExecuting] = useState(false);
 
   // Local vs Cloud Backend Target
   const [backendEndpoint, setBackendEndpoint] = useState<string>('/api');
@@ -426,6 +436,16 @@ export default function App() {
       return;
     }
 
+    if (['cmd', 'terminal', 'open cmd', 'open terminal', 'launch cmd', 'launch terminal', 'start console'].includes(low)) {
+      handleLaunchCmd();
+      return;
+    }
+
+    if (['close cmd', 'close terminal', 'exit cmd'].includes(low)) {
+      handleCloseCmd();
+      return;
+    }
+
     if (low === 'files') {
       fetchFolderFiles('desktop');
       setActiveModal('files');
@@ -680,6 +700,71 @@ export default function App() {
         addJarvisLog(data.message || `Dispatched ${action} sequence, sir.`);
       }
     } catch {}
+  };
+
+  // Terminal Automation Operations
+  const fetchTerminalStatus = async () => {
+    try {
+      const res = await fetch(`${backendEndpoint}/terminal/status`);
+      const data = await res.json();
+      setTerminalStatus(data);
+    } catch {
+      setTerminalStatus({ alive: false });
+    }
+  };
+
+  const handleLaunchCmd = async () => {
+    try {
+      const res = await fetch(`${backendEndpoint}/terminal/start`, { method: 'POST' });
+      const data = await res.json();
+      const msg = data.message || 'J.A.R.V.I.S. Command Console launched, sir.';
+      addJarvisLog(msg, { tool: 'start_terminal_console', result: data });
+      if (voxEnabled) speak(msg);
+      fetchTerminalStatus();
+    } catch {
+      addJarvisLog('Failed to start Command Console, sir.');
+    }
+  };
+
+  const handleCloseCmd = async () => {
+    try {
+      const res = await fetch(`${backendEndpoint}/terminal/close`, { method: 'POST' });
+      const data = await res.json();
+      const msg = data.message || 'Command Console closed, sir.';
+      addJarvisLog(msg, { tool: 'close_terminal_console', result: data });
+      if (voxEnabled) speak(msg);
+      fetchTerminalStatus();
+    } catch {
+      addJarvisLog('Failed to close Command Console, sir.');
+    }
+  };
+
+  const handleExecuteTerminalCommand = async (cmdStr: string) => {
+    const clean = cmdStr.trim();
+    if (!clean) return;
+    setTerminalExecuting(true);
+    try {
+      const res = await fetch(`${backendEndpoint}/terminal/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: clean }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        let msg = data.message || `Command '${clean}' visibly typed and executed in CMD, sir.`;
+        addJarvisLog(msg, { tool: 'execute_terminal_command', args: { command: clean }, result: data });
+        if (voxEnabled) speak(`Command executed in visible CMD, sir.`);
+      } else {
+        const errMsg = `Terminal execution error: ${data.error || 'Failed to inject keystrokes'}`;
+        addJarvisLog(errMsg, { tool: 'execute_terminal_command', args: { command: clean }, result: data });
+      }
+      fetchTerminalStatus();
+    } catch (e: any) {
+      addJarvisLog(`Terminal dispatch error: ${e.message}`);
+    } finally {
+      setTerminalExecuting(false);
+      setTerminalCmdInput('');
+    }
   };
 
   // Keyboard Navigation for Console Input
@@ -1080,12 +1165,22 @@ export default function App() {
           </div>
 
           {/* Quick HUD Navigation Buttons */}
-          <div className="grid grid-cols-4 sm:grid-cols-7 gap-2 w-full max-w-lg mt-auto pt-3 border-t border-[var(--line)]">
+          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 w-full max-w-xl mt-auto pt-3 border-t border-[var(--line)]">
             <button onClick={() => executeCommand('time')} className="hud-button text-xs py-1.5">
               TIME
             </button>
             <button onClick={() => executeCommand('scan')} className="hud-button text-xs py-1.5">
               SCAN
+            </button>
+            <button
+              onClick={() => {
+                fetchTerminalStatus();
+                setActiveModal('terminal');
+              }}
+              className="hud-button text-xs py-1.5 border-[var(--accent)] text-[var(--accent)] font-bold"
+              title="Dedicated CMD Console"
+            >
+              CMD
             </button>
             <button onClick={() => setActiveModal('apps')} className="hud-button text-xs py-1.5">
               APPS
@@ -1114,10 +1209,22 @@ export default function App() {
         {/* ================= RIGHT COLUMN (COMMAND CONSOLE) ================= */}
         <div className="hud-panel p-3 flex flex-col min-h-0 relative">
           <div className="flex items-center justify-between mb-2 pb-1 border-b border-[var(--line)]">
-            <h2 className="hud-title mb-0 flex items-center space-x-1.5">
-              <Terminal className="w-3.5 h-3.5 text-[var(--accent)]" />
-              <span>COMMAND CONSOLE</span>
-            </h2>
+            <div className="flex items-center space-x-2">
+              <h2 className="hud-title mb-0 flex items-center space-x-1.5">
+                <Terminal className="w-3.5 h-3.5 text-[var(--accent)]" />
+                <span>COMMAND CONSOLE</span>
+              </h2>
+              <button
+                onClick={() => {
+                  fetchTerminalStatus();
+                  setActiveModal('terminal');
+                }}
+                className="hud-button text-[9px] py-0.5 px-1.5 text-[var(--accent)]"
+                title="Open CMD Automation Control"
+              >
+                CMD HUD
+              </button>
+            </div>
             <div className="flex items-center space-x-2">
               <button
                 onClick={fetchClipboard}
@@ -1697,6 +1804,9 @@ export default function App() {
                     <code className="text-[var(--text)]">scan</code> — Full Diagnostic
                   </div>
                   <div>
+                    <code className="text-[var(--text)]">cmd</code> — Terminal Automation
+                  </div>
+                  <div>
                     <code className="text-[var(--text)]">apps</code> — App Registry
                   </div>
                   <div>
@@ -1722,6 +1832,151 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DEDICATED VISIBLE COMMAND CONSOLE MODAL */}
+      {activeModal === 'terminal' && (
+        <div className="fixed inset-0 z-40 bg-black/65 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="hud-panel p-5 max-w-xl w-full bg-[var(--panel-solid)] space-y-4 max-h-[85vh] flex flex-col font-mono">
+            <div className="flex items-center justify-between border-b border-[var(--line)] pb-2">
+              <h3 className="hud-title mb-0 flex items-center space-x-2">
+                <Terminal className="w-4 h-4 text-[var(--accent)]" />
+                <span>J.A.R.V.I.S. VISIBLE CMD AUTOMATION</span>
+              </h3>
+              <button
+                onClick={() => setActiveModal('none')}
+                className="text-[var(--dim)] hover:text-[var(--text)] text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Console Status Overview */}
+            <div className="bg-black/40 border border-[var(--line)] p-3 rounded space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[var(--dim)]">CONSOLE WINDOW STATUS:</span>
+                <span
+                  className={
+                    terminalStatus?.alive
+                      ? 'text-emerald-400 font-bold flex items-center'
+                      : 'text-amber-400 font-bold flex items-center'
+                  }
+                >
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full mr-1.5 ${
+                      terminalStatus?.alive ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-amber-400'
+                    }`}
+                  />
+                  {terminalStatus?.alive ? 'ONLINE & VISIBLE' : 'STANDBY / CLOSED'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-[var(--dim)]">
+                <span>WINDOW HANDLE (HWND):</span>
+                <span className="text-[var(--accent)] font-bold">
+                  {terminalStatus?.hwnd || 'NONE ACQUIRED'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-[var(--dim)]">
+                <span>SESSION ID:</span>
+                <span className="text-[var(--text)]">
+                  {terminalStatus?.session_id || 'STANDBY'}
+                </span>
+              </div>
+            </div>
+
+            {/* Console Lifecycle Actions */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                onClick={handleLaunchCmd}
+                className="hud-button p-2.5 flex items-center justify-center space-x-2 text-[var(--accent)] border-[var(--accent)] font-bold"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>LAUNCH / FOCUS CMD</span>
+              </button>
+              <button
+                onClick={handleCloseCmd}
+                className="hud-button p-2.5 flex items-center justify-center space-x-2 text-rose-300 border-rose-500"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>CLOSE CMD WINDOW</span>
+              </button>
+            </div>
+
+            {/* Live Command Injection Section */}
+            <div className="border-t border-[var(--line)] pt-3 space-y-2">
+              <div className="text-xs font-bold text-[var(--accent)] flex items-center justify-between">
+                <span>PHYSICAL KEYSTROKE INJECTION</span>
+                <span className="text-[10px] text-[var(--dim)] font-normal">
+                  SendInput (Unicode) + Verified Focus
+                </span>
+              </div>
+              <p className="text-[11px] text-[var(--dim)]">
+                Keystrokes will be physically injected into the active CMD window and executed with ENTER:
+              </p>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={terminalCmdInput}
+                  onChange={(e) => setTerminalCmdInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleExecuteTerminalCommand(terminalCmdInput)}
+                  placeholder="Enter command (e.g. dir, echo Hello Sir)..."
+                  disabled={terminalExecuting}
+                  className="hud-input flex-1 text-xs py-1.5 px-2"
+                />
+                <button
+                  onClick={() => handleExecuteTerminalCommand(terminalCmdInput)}
+                  disabled={terminalExecuting || !terminalCmdInput.trim()}
+                  className="hud-button text-xs py-1.5 px-3 flex items-center space-x-1.5 disabled:opacity-50"
+                >
+                  {terminalExecuting ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      <span>INJECTING...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Terminal className="w-3 h-3" />
+                      <span>INJECT &amp; RUN</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Preset Diagnostic Buttons */}
+              <div className="flex flex-wrap gap-1.5 pt-1 text-[10px]">
+                <span className="text-[var(--dim)] self-center mr-1">QUICK TESTS:</span>
+                {[
+                  'dir',
+                  'echo J.A.R.V.I.S. Core Online',
+                  'whoami',
+                  'ipconfig',
+                  'python --version',
+                  'cls',
+                ].map((tc) => (
+                  <button
+                    key={tc}
+                    onClick={() => handleExecuteTerminalCommand(tc)}
+                    disabled={terminalExecuting}
+                    className="hud-button text-[10px] py-0.5 px-2 font-mono"
+                  >
+                    {tc}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Architecture Explanatory Note */}
+            <div className="text-[10px] text-[var(--dim)] border-t border-[var(--line)] pt-2 leading-relaxed">
+              <span className="text-[var(--accent)] font-bold">AUTOMATION ARCHITECTURE:</span> J.A.R.V.I.S.
+              locates the dedicated CMD HWND, breaks Windows background lock via thread-attachment and
+              ALT key cycling, verifies foreground focus, injects Unicode characters character-by-character,
+              and presses ENTER. No simulated background subprocesses.
             </div>
           </div>
         </div>

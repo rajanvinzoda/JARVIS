@@ -120,6 +120,11 @@ def open_application(app_name: str) -> dict:
     """Safely launches an authorized application by name or alias."""
     app_key = resolve_app_key(app_name)
 
+    # Route terminal/cmd to the authoritative CommandConsoleManager
+    if app_key == "terminal":
+        from backend.tools.terminal import start_terminal_console
+        return start_terminal_console()
+
     if app_key not in SAFE_APPLICATIONS:
         allowed = ", ".join(SAFE_APPLICATIONS.keys())
         return {

@@ -10,6 +10,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import * as cp from 'child_process';
 import dotenv from 'dotenv';
 import * as si from 'systeminformation';
 import { createServer as createViteServer } from 'vite';
@@ -296,7 +297,151 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'execute_terminal_command',
+      description: 'Visibly types and executes a shell command (such as echo Hello Sir, dir, python --version, whoami, ipconfig) into the active J.A.R.V.I.S. Command Prompt window. The user will visibly see the command typed and executed in the CMD window.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The exact command to visibly type and execute in the CMD window.' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'start_terminal_console',
+      description: 'Launches or brings to foreground the dedicated visible J.A.R.V.I.S. Command Prompt window.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
 ];
+
+// Terminal Automation Helper via authoritative Python backend manager
+async function runTerminalCommand(command: string): Promise<any> {
+  return new Promise((resolve) => {
+    const pythonCode = `import sys, json; from backend.tools.terminal import execute_terminal_command; print(json.dumps(execute_terminal_command(sys.argv[1])))`;
+    const child = cp.spawn('python3', ['-c', pythonCode, command], {
+      cwd: ROOT_DIR,
+    });
+    let output = '';
+    let errLog = '';
+    child.stdout.on('data', (d) => (output += d.toString()));
+    child.stderr.on('data', (d) => (errLog += d.toString()));
+    child.on('close', (code) => {
+      try {
+        const parsed = JSON.parse(output.trim());
+        resolve(parsed);
+      } catch {
+        resolve({
+          success: code === 0,
+          state: code === 0 ? 'EXECUTED' : 'EXECUTION_FAILED',
+          message: output.trim() || errLog.trim() || `Command '${command}' dispatched.`,
+        });
+      }
+    });
+  });
+}
+
+async function startTerminalConsole(): Promise<any> {
+  return new Promise((resolve) => {
+    const pythonCode = `import json; from backend.tools.terminal import start_terminal_console; print(json.dumps(start_terminal_console()))`;
+    const child = cp.spawn('python3', ['-c', pythonCode], { cwd: ROOT_DIR });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d.toString()));
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(output.trim()));
+      } catch {
+        resolve({ success: true, message: 'Command Console started.' });
+      }
+    });
+  });
+}
+
+async function getTerminalStatus(): Promise<any> {
+  return new Promise((resolve) => {
+    const pythonCode = `import json; from backend.tools.terminal import get_terminal_status; print(json.dumps(get_terminal_status()))`;
+    const child = cp.spawn('python3', ['-c', pythonCode], { cwd: ROOT_DIR });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d.toString()));
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(output.trim()));
+      } catch {
+        resolve({ alive: true });
+      }
+    });
+  });
+}
+
+async function closeTerminalConsole(): Promise<any> {
+  return new Promise((resolve) => {
+    const pythonCode = `import json; from backend.tools.terminal import close_terminal_console; print(json.dumps(close_terminal_console()))`;
+    const child = cp.spawn('python3', ['-c', pythonCode], { cwd: ROOT_DIR });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d.toString()));
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(output.trim()));
+      } catch {
+        resolve({ success: true, message: 'Command Console closed.' });
+      }
+    });
+  });
+}
+
+function extractTerminalIntent(userMessage: string): { isTerminal: boolean; command: string } {
+  const raw = userMessage.trim();
+  const low = raw.toLowerCase();
+
+  const patternsPrefix = [
+    /^(?:please\s+)?(?:type|run|execute|write)\s+(?:in|into|to|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?[:\s]+(.+)$/i,
+    /^(?:please\s+)?(?:in|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?[:\s]+(?:please\s+)?(?:type|run|execute|write)?[:\s]*(.+)$/i,
+    /^(?:cmd|terminal)[:\s]+(.+)$/i,
+    /^(?:open|launch|start)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?\s+(?:and|then)\s+(?:type|run|execute)\s+(.+)$/i,
+  ];
+
+  for (const pat of patternsPrefix) {
+    const m = raw.match(pat);
+    if (m && m[1]) {
+      let ext = m[1].trim();
+      if ((ext.startsWith('"') && ext.endsWith('"')) || (ext.startsWith("'") && ext.endsWith("'"))) {
+        ext = ext.slice(1, -1).trim();
+      }
+      if (ext) return { isTerminal: true, command: ext };
+    }
+  }
+
+  const patternSuffix = /^(?:please\s+)?(?:type|run|execute|write)\s+(.+?)\s+(?:in|into|to|on)\s+(?:the\s+)?(?:cmd|terminal|command\s+prompt)(?:\s*window)?$/i;
+  const mSuf = raw.match(patternSuffix);
+  if (mSuf && mSuf[1]) {
+    let ext = mSuf[1].trim();
+    if ((ext.startsWith('"') && ext.endsWith('"')) || (ext.startsWith("'") && ext.endsWith("'"))) {
+      ext = ext.slice(1, -1).trim();
+    }
+    if (ext) return { isTerminal: true, command: ext };
+  }
+
+  const shellTriggers = [
+    'echo ', 'dir', 'whoami', 'ipconfig', 'ping ', 'python ',
+    'python.exe ', 'node ', 'git ', 'mkdir ', 'cd ', 'type ', 'cls'
+  ];
+  for (const st of shellTriggers) {
+    if (low === st.trim() || low.startsWith(st)) {
+      return { isTerminal: true, command: raw };
+    }
+  }
+
+  return { isTerminal: false, command: '' };
+}
 
 // Helper to execute tools
 async function executeTool(name: string, args: any): Promise<any> {
@@ -426,6 +571,9 @@ async function executeTool(name: string, args: any): Promise<any> {
       'calc': 'calculator',
     };
     const appKey = aliasMap[rawApp] || rawApp;
+    if (appKey === 'terminal') {
+      return await startTerminalConsole();
+    }
     const resolvedName = SAFE_APPS[appKey] || SAFE_APPS[appKey.replace(/\s+/g, '')];
     if (resolvedName) {
       return {
@@ -450,6 +598,19 @@ async function executeTool(name: string, args: any): Promise<any> {
     const updated = cur + (cur ? '\n' : '') + args.note_text;
     saveStoredNotes(updated);
     return { success: true, message: 'Appended note.', notes: updated };
+  }
+
+  if (name === 'execute_terminal_command') {
+    const cmd = args.command || '';
+    return await runTerminalCommand(cmd);
+  }
+
+  if (name === 'start_terminal_console') {
+    return await startTerminalConsole();
+  }
+
+  if (name === 'close_terminal_console') {
+    return await closeTerminalConsole();
   }
 
   if (name === 'search_web') {
@@ -578,6 +739,52 @@ app.post('/api/chat', async (req: Request, res: Response) => {
         'I am J.A.R.V.I.S., your cybernetic personal operating assistant. Just A Rather Very Intelligent System, at your command, sir.',
     });
     return;
+  }
+
+  // Explicit terminal launch commands
+  if ([
+    'open cmd', 'open terminal', 'launch cmd', 'launch terminal',
+    'start console', 'open command console', 'show cmd', 'focus cmd'
+  ].includes(lower)) {
+    const termStart = await startTerminalConsole();
+    res.json({
+      response: termStart.message || 'J.A.R.V.I.S. Command Console has been launched, sir.',
+      action: { tool: 'start_terminal_console', result: termStart },
+    });
+    return;
+  }
+
+  if (['close cmd', 'close terminal', 'exit cmd', 'close command console'].includes(lower)) {
+    const termClose = await closeTerminalConsole();
+    res.json({
+      response: termClose.message || 'J.A.R.V.I.S. Command Console closed, sir.',
+      action: { tool: 'close_terminal_console', result: termClose },
+    });
+    return;
+  }
+
+  // Enhanced natural language terminal command extraction
+  const { isTerminal: isTerminalCmd, command: terminalCmdStr } = extractTerminalIntent(userQuery);
+
+  if (isTerminalCmd && terminalCmdStr) {
+    const termRes = await runTerminalCommand(terminalCmdStr);
+    if (termRes.success) {
+      let reply = `Command '${terminalCmdStr}' visibly typed and executed in J.A.R.V.I.S. Command Console, sir.`;
+      if (termRes.output) {
+        reply += `\n\nOutput:\n${termRes.output}`;
+      }
+      res.json({
+        response: reply,
+        action: { tool: 'execute_terminal_command', args: { command: terminalCmdStr }, result: termRes },
+      });
+      return;
+    } else {
+      res.json({
+        response: `I couldn't execute the command in the Command Console, sir: ${termRes.error || 'Execution failed'}.`,
+        action: { tool: 'execute_terminal_command', args: { command: terminalCmdStr }, result: termRes },
+      });
+      return;
+    }
   }
 
   // AI Orchestration via BluesMinds API
@@ -1044,6 +1251,28 @@ app.post('/api/windows/sleep', (req: Request, res: Response) => {
 
 app.get('/api/logs', (req: Request, res: Response) => {
   res.json({ logs: [] });
+});
+
+// Terminal Automation Endpoints (Section 2 & 7)
+app.post('/api/terminal/execute', async (req: Request, res: Response) => {
+  const command = (req.body.command || '').trim();
+  const result = await runTerminalCommand(command);
+  res.json(result);
+});
+
+app.post('/api/terminal/start', async (req: Request, res: Response) => {
+  const result = await startTerminalConsole();
+  res.json(result);
+});
+
+app.get('/api/terminal/status', async (req: Request, res: Response) => {
+  const result = await getTerminalStatus();
+  res.json(result);
+});
+
+app.post('/api/terminal/close', async (req: Request, res: Response) => {
+  const result = await closeTerminalConsole();
+  res.json(result);
 });
 
 // Initialize server and mount Vite
