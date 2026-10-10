@@ -39,6 +39,16 @@
       <div class="bar"><label><span>NETWORK</span><span id="v4">0 Mb/s</span></label><div><i id="b4"></i></div></div>
       <div id="bat" style="font-size:11px;color:var(--dim);margin-top:8px">DEVICE POWER: AC LINE</div>
       <div id="gpu" style="font-size:11px;color:var(--dim);margin-top:4px">GPU: CHECKING...</div>
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--line);font-size:11px;color:var(--dim);">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <span>REFRESH RATE:</span><span id="int-label" style="color:var(--accent);font-family:monospace;font-weight:bold;">2500ms</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;">
+          <button onclick="setTelemetryInterval(2500)" style="padding:3px;font-size:10px;">2500ms</button>
+          <button onclick="setTelemetryInterval(5000)" style="padding:3px;font-size:10px;">5000ms</button>
+          <button onclick="setTelemetryInterval(10000)" style="padding:3px;font-size:10px;">10000ms</button>
+        </div>
+      </div>
     </div>
 
     <div class="panel" style="flex:1">

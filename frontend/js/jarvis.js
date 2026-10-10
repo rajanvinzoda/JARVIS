@@ -83,7 +83,18 @@ async function fetchTelemetry() {
     // Backend offline / connecting
   }
 }
-setInterval(fetchTelemetry, 2500);
+let telemetryTimer = null;
+let telemetryMs = 2500;
+
+function setTelemetryInterval(ms) {
+  telemetryMs = ms;
+  if ($("int-label")) $("int-label").textContent = ms + "ms";
+  if (telemetryTimer) clearInterval(telemetryTimer);
+  telemetryTimer = setInterval(fetchTelemetry, telemetryMs);
+  say("Telemetry refresh interval adjusted to " + ms + "ms, sir.");
+}
+
+telemetryTimer = setInterval(fetchTelemetry, telemetryMs);
 fetchTelemetry();
 
 // 4. Notes Persistence
@@ -183,6 +194,7 @@ async function run(input) {
   }
 
   // AI & Tool Backend Call
+  if ($("reactor")) $("reactor").classList.add("processing");
   try {
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
@@ -200,6 +212,8 @@ async function run(input) {
     say(data.response || "Action processed, sir.", data.operation_id);
   } catch (err) {
     say("Neural uplink anomaly (" + err.message + "). Local systems remain operational, sir.");
+  } finally {
+    if ($("reactor")) $("reactor").classList.remove("processing");
   }
 }
 

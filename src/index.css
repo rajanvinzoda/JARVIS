@@ -1,46 +1,82 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #02121c;
-  --panel: #06202ecc;
-  --panel-solid: #06202e;
-  --line: #12d6ff55;
-  --accent: #12d6ff;
-  --accent-glow: #12d6ff88;
-  --text: #bdefff;
-  --dim: #6aa9bd;
-  --warn: #ffb020;
-  --danger: #ff4d4d;
-  --success: #00ffaa;
+  --bg: #030a12;
+  --panel: #071524e6;
+  --panel-solid: #071524;
+  --line: #12d6ff33;
+  --accent: #00f0ff;
+  --accent-glow: #00f0ff66;
+  --accent-cyan: #00f0ff;
+  --accent-cyan-glow: #00f0ff88;
+  --accent-purple: #c084fc;
+  --accent-purple-glow: #a855f788;
+  --accent-amber: #fbbf24;
+  --accent-amber-glow: #f59e0b88;
+  --accent-emerald: #34d399;
+  --accent-emerald-glow: #10b98188;
+  --accent-rose: #fb7185;
+  --accent-rose-glow: #f43f5e88;
+  --accent-blue: #60a5fa;
+  --accent-blue-glow: #3b82f688;
+  --text: #e2f4fb;
+  --dim: #7ca8bf;
+  --warn: #fbbf24;
+  --danger: #fb7185;
+  --success: #34d399;
   box-sizing: border-box;
 }
 
 :root[data-theme="light"] {
-  --bg: #e9f6fb;
-  --panel: #ffffffcc;
+  --bg: #f0f7fc;
+  --panel: #ffffffea;
   --panel-solid: #ffffff;
-  --line: #0585a855;
-  --accent: #0585a8;
-  --accent-glow: #0585a866;
-  --text: #073a4a;
-  --dim: #4a7f90;
+  --line: #0284c733;
+  --accent: #0284c7;
+  --accent-glow: #0284c744;
+  --accent-cyan: #0284c7;
+  --accent-cyan-glow: #0284c766;
+  --accent-purple: #9333ea;
+  --accent-purple-glow: #9333ea55;
+  --accent-amber: #d97706;
+  --accent-amber-glow: #d9770655;
+  --accent-emerald: #059669;
+  --accent-emerald-glow: #05966955;
+  --accent-rose: #e11d48;
+  --accent-rose-glow: #e11d4855;
+  --accent-blue: #2563eb;
+  --accent-blue-glow: #2563eb55;
+  --text: #0f2d3d;
+  --dim: #4b7285;
   --warn: #d97706;
-  --danger: #dc2626;
+  --danger: #e11d48;
   --success: #059669;
 }
 
 :root[data-theme="dark"] {
-  --bg: #02121c;
-  --panel: #06202ecc;
-  --panel-solid: #06202e;
-  --line: #12d6ff55;
-  --accent: #12d6ff;
-  --accent-glow: #12d6ff88;
-  --text: #bdefff;
-  --dim: #6aa9bd;
-  --warn: #ffb020;
-  --danger: #ff4d4d;
-  --success: #00ffaa;
+  --bg: #030a12;
+  --panel: #071524e6;
+  --panel-solid: #071524;
+  --line: #12d6ff33;
+  --accent: #00f0ff;
+  --accent-glow: #00f0ff66;
+  --accent-cyan: #00f0ff;
+  --accent-cyan-glow: #00f0ff88;
+  --accent-purple: #c084fc;
+  --accent-purple-glow: #a855f788;
+  --accent-amber: #fbbf24;
+  --accent-amber-glow: #f59e0b88;
+  --accent-emerald: #34d399;
+  --accent-emerald-glow: #10b98188;
+  --accent-rose: #fb7185;
+  --accent-rose-glow: #f43f5e88;
+  --accent-blue: #60a5fa;
+  --accent-blue-glow: #3b82f688;
+  --text: #e2f4fb;
+  --dim: #7ca8bf;
+  --warn: #fbbf24;
+  --danger: #fb7185;
+  --success: #34d399;
 }
 
 * {
@@ -59,7 +95,12 @@ html, body {
 }
 
 body {
-  background: radial-gradient(ellipse at 50% 30%, color-mix(in srgb, var(--accent) 12%, var(--bg)), var(--bg) 70%);
+  background:
+    radial-gradient(ellipse at 50% 18%, rgba(0, 240, 255, 0.09), transparent 55%),
+    radial-gradient(ellipse at 15% 85%, rgba(168, 85, 247, 0.08), transparent 50%),
+    radial-gradient(ellipse at 85% 80%, rgba(245, 158, 11, 0.07), transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(16, 185, 129, 0.04), transparent 65%),
+    var(--bg);
 }
 
 /* Custom Scrollbars */
@@ -68,14 +109,14 @@ body {
   height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.3);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--line);
+  background: #1e3a5f;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--accent);
+  background: var(--accent-cyan);
 }
 
 /* Animations */
@@ -88,8 +129,32 @@ body {
 }
 
 @keyframes corePulse {
-  0%, 100% { opacity: 0.85; transform: scale(1); filter: drop-shadow(0 0 12px var(--accent)); }
-  50% { opacity: 0.35; transform: scale(0.96); filter: drop-shadow(0 0 4px var(--accent)); }
+  0%, 100% { opacity: 0.85; transform: scale(1); filter: drop-shadow(0 0 14px var(--accent-cyan)) drop-shadow(0 0 20px var(--accent-purple)); }
+  50% { opacity: 0.35; transform: scale(0.96); filter: drop-shadow(0 0 6px var(--accent-cyan)); }
+}
+
+@keyframes corePulseProcessing {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1.15);
+    filter: drop-shadow(0 0 28px var(--accent-cyan)) drop-shadow(0 0 45px var(--accent-purple)) drop-shadow(0 0 55px var(--accent-amber));
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.90);
+    filter: drop-shadow(0 0 10px var(--accent-cyan)) drop-shadow(0 0 20px var(--accent-purple));
+  }
+}
+
+@keyframes innerCorePulseProcessing {
+  0%, 100% {
+    transform: scale(1.22);
+    filter: drop-shadow(0 0 20px #ffffff) drop-shadow(0 0 30px var(--accent-cyan)) drop-shadow(0 0 40px var(--accent-purple));
+  }
+  50% {
+    transform: scale(0.85);
+    filter: drop-shadow(0 0 8px var(--accent-cyan));
+  }
 }
 
 @keyframes scanLine {
@@ -100,24 +165,78 @@ body {
 .spin {
   transform-origin: 150px 150px;
   animation: spinClockwise 14s linear infinite;
+  transition: animation-duration 0.5s ease;
 }
 
 .spin2 {
   transform-origin: 150px 150px;
   animation: spinCounterClockwise 9s linear infinite;
+  transition: animation-duration 0.5s ease;
+}
+
+.spin-fast,
+.reactor-processing .spin,
+[data-processing="true"] .spin {
+  transform-origin: 150px 150px;
+  animation: spinClockwise 3.5s linear infinite;
+}
+
+.spin2-fast,
+.reactor-processing .spin2,
+[data-processing="true"] .spin2 {
+  transform-origin: 150px 150px;
+  animation: spinCounterClockwise 2.2s linear infinite;
 }
 
 .core-pulse {
   animation: corePulse 2.4s ease-in-out infinite;
   transform-origin: 150px 150px;
+  transition: all 0.3s ease;
+}
+
+/* Dynamic fast pulsing rhythm while processing commands */
+.core-pulse.core-pulse-active,
+.core-pulse-processing,
+.reactor-processing .core-pulse,
+[data-processing="true"] #core,
+[data-processing="true"] .core-pulse {
+  animation: corePulseProcessing 0.52s cubic-bezier(0.4, 0, 0.6, 1) infinite !important;
+  transform-origin: 150px 150px;
+}
+
+.core-inner-active,
+.reactor-processing .core-inner-active,
+[data-processing="true"] .core-inner-active {
+  animation: innerCorePulseProcessing 0.52s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  transform-origin: 150px 150px;
+}
+
+.reactor-processing,
+[data-processing="true"]#reactor {
+  filter: drop-shadow(0 0 35px var(--accent-cyan)) drop-shadow(0 0 60px var(--accent-purple));
 }
 
 .hud-panel {
   border: 1px solid var(--line);
   background: var(--panel);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
   border-radius: 6px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25), inset 0 0 15px rgba(18, 214, 255, 0.03);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 0 15px rgba(0, 240, 255, 0.02);
+}
+
+.hud-panel-amber {
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 0 15px rgba(245, 158, 11, 0.03);
+}
+
+.hud-panel-purple {
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 0 15px rgba(168, 85, 247, 0.03);
+}
+
+.hud-panel-emerald {
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 0 15px rgba(16, 185, 129, 0.03);
 }
 
 .hud-title {

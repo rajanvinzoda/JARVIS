@@ -29,6 +29,11 @@ import {
   Power,
   Search,
   Clipboard,
+  History,
+  Play,
+  CornerDownLeft,
+  X,
+  Filter,
 } from 'lucide-react';
 
 type ProcessingState =
@@ -105,6 +110,26 @@ export default function App() {
     gpu: { name: 'GPU: TELEMETRY PENDING', available: false },
   });
 
+  // Telemetry Auto-Refresh Interval Setting (2500ms, 5000ms, 10000ms)
+  const [telemetryInterval, setTelemetryInterval] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('jarvis-telemetry-interval');
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if ([2500, 5000, 10000].includes(parsed)) return parsed;
+      }
+    } catch {}
+    return 2500;
+  });
+
+  const handleTelemetryIntervalChange = (val: number) => {
+    setTelemetryInterval(val);
+    try {
+      localStorage.setItem('jarvis-telemetry-interval', String(val));
+    } catch {}
+    setHudStatus(`TELEMETRY REFRESH RATE: ${val}MS`);
+  };
+
   // Processing State
   const [processingState, setProcessingState] = useState<ProcessingState>('IDLE');
   const [neuralLinkOnline, setNeuralLinkOnline] = useState<boolean>(true);
@@ -116,8 +141,75 @@ export default function App() {
   const [hudStatus, setHudStatus] = useState('ALL SYSTEMS NOMINAL');
   const [consoleLogs, setConsoleLogs] = useState<LogMessage[]>([]);
   const [inputVal, setInputVal] = useState('');
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('jarvis-cmd-history');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return ['scan', 'time', 'status', 'open cmd', 'help', 'apps', 'files', 'processes'];
+  });
   const [histIndex, setHistIndex] = useState<number>(-1);
+
+  // Searchable Command History Overlay State
+  const [showHistoryOverlay, setShowHistoryOverlay] = useState<boolean>(false);
+  const [historySearchQuery, setHistorySearchQuery] = useState<string>('');
+  const [historyCategoryFilter, setHistoryCategoryFilter] = useState<'ALL' | 'SYSTEM' | 'TERMINAL' | 'APPS'>('ALL');
+  const [selectedHistoryIndex, setSelectedHistoryIndex] = useState<number>(0);
+  const historySearchInputRef = useRef<HTMLInputElement>(null);
+  const mainInputRef = useRef<HTMLInputElement>(null);
+
+  const recordCommandToHistory = (rawCmd: string) => {
+    const trimmed = rawCmd.trim();
+    if (!trimmed) return;
+    setHistory((prev) => {
+      const updated = [...prev.filter((c) => c.toLowerCase() !== trimmed.toLowerCase()), trimmed];
+      try {
+        localStorage.setItem('jarvis-cmd-history', JSON.stringify(updated.slice(-100)));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const removeFromHistory = (cmdToRemove: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setHistory((prev) => {
+      const updated = prev.filter((c) => c !== cmdToRemove);
+      try {
+        localStorage.setItem('jarvis-cmd-history', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const clearAllHistory = () => {
+    setHistory([]);
+    try {
+      localStorage.removeItem('jarvis-cmd-history');
+    } catch {}
+    setHudStatus('COMMAND HISTORY ARCHIVE PURGED');
+  };
+
+  const reversedHistory = [...history].reverse();
+  const filteredHistory = reversedHistory.filter((cmd) => {
+    const q = historySearchQuery.toLowerCase().trim();
+    const matchesQuery = !q || cmd.toLowerCase().includes(q);
+    if (!matchesQuery) return false;
+    if (historyCategoryFilter === 'ALL') return true;
+    const lowCmd = cmd.toLowerCase();
+    if (historyCategoryFilter === 'SYSTEM') {
+      return ['scan', 'time', 'status', 'theme', 'vox', 'clear'].some((k) => lowCmd.includes(k));
+    }
+    if (historyCategoryFilter === 'TERMINAL') {
+      return ['cmd', 'terminal', 'dir', 'ipconfig', 'echo', 'ping', 'run'].some((k) => lowCmd.includes(k));
+    }
+    if (historyCategoryFilter === 'APPS') {
+      return ['app', 'file', 'process', 'calc', 'note', 'clip', 'power', 'help'].some((k) => lowCmd.includes(k));
+    }
+    return true;
+  });
 
   // Audio & Voice
   const [voxEnabled, setVoxEnabled] = useState(false);
@@ -148,6 +240,12 @@ export default function App() {
   } | null>(null);
   const [terminalCmdInput, setTerminalCmdInput] = useState('');
   const [terminalExecuting, setTerminalExecuting] = useState(false);
+
+  // Dynamic Command Processing State for Arc Reactor and Telemetry
+  const isProcessing =
+    processingState === 'ANALYZING' ||
+    processingState === 'EXECUTING' ||
+    terminalExecuting;
 
   // Local vs Cloud Backend Target
   const [backendEndpoint, setBackendEndpoint] = useState<string>('/api');
@@ -230,9 +328,9 @@ export default function App() {
 
   useEffect(() => {
     fetchTelemetry();
-    const interval = setInterval(fetchTelemetry, 2500);
+    const interval = setInterval(fetchTelemetry, telemetryInterval);
     return () => clearInterval(interval);
-  }, [backendEndpoint]);
+  }, [backendEndpoint, telemetryInterval]);
 
   // 4. Notes Persistence
   useEffect(() => {
@@ -375,12 +473,22 @@ export default function App() {
 
     addUserLog(raw);
     setInputVal('');
-    setHistory((prev) => [...prev, raw]);
+    recordCommandToHistory(raw);
     setHistIndex(-1);
 
     const low = raw.toLowerCase().replace(/[?!.]+$/, '');
 
     // 1. Direct local deterministic commands
+    if (['history', 'hist', 'command history', 'past commands'].includes(low)) {
+      setShowHistoryOverlay(true);
+      setHistorySearchQuery('');
+      setSelectedHistoryIndex(0);
+      const msg = 'Displaying searchable command history archive, sir.';
+      addJarvisLog(msg);
+      if (voxEnabled) speak(msg);
+      return;
+    }
+
     if (low === 'theme') {
       const r = document.documentElement;
       const currentDark =
@@ -410,6 +518,8 @@ export default function App() {
     }
 
     if (low === 'scan') {
+      setProcessingState('EXECUTING');
+      setHudStatus('SCANNING WORKSTATION...');
       await fetchTelemetry();
       const cpu = systemStats.cpu.percent;
       const mem = systemStats.memory.percent;
@@ -418,6 +528,8 @@ export default function App() {
       const msg = `Full diagnostic complete, sir. Core load is at ${cpu}%, memory consumption at ${mem}%, power state: ${bat}. Host OS platform: ${osName}.`;
       addJarvisLog(msg);
       if (voxEnabled) speak(msg);
+      setProcessingState('COMPLETED');
+      setTimeout(() => setProcessingState('IDLE'), 2000);
       return;
     }
 
@@ -767,8 +879,24 @@ export default function App() {
     }
   };
 
+  // Auto-focus search input when history overlay opens
+  useEffect(() => {
+    if (showHistoryOverlay) {
+      setTimeout(() => {
+        historySearchInputRef.current?.focus();
+      }, 50);
+    }
+  }, [showHistoryOverlay]);
+
   // Keyboard Navigation for Console Input
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'h' || e.key === 'H' || e.key === 'r' || e.key === 'R')) {
+      e.preventDefault();
+      setShowHistoryOverlay((prev) => !prev);
+      setHistorySearchQuery('');
+      setSelectedHistoryIndex(0);
+      return;
+    }
     if (e.key === 'Enter') {
       executeCommand(inputVal);
     } else if (e.key === 'ArrowUp') {
@@ -787,6 +915,48 @@ export default function App() {
           setHistIndex(nextIdx);
           setInputVal(history[nextIdx] || '');
         }
+      }
+    }
+  };
+
+  // History Overlay Keyboard Handler
+  const handleHistoryOverlayKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    filtered: string[]
+  ) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setShowHistoryOverlay(false);
+      mainInputRef.current?.focus();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (filtered.length > 0) {
+        setSelectedHistoryIndex((prev) => (prev + 1) % filtered.length);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (filtered.length > 0) {
+        setSelectedHistoryIndex((prev) => (prev - 1 + filtered.length) % filtered.length);
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filtered.length > 0 && filtered[selectedHistoryIndex]) {
+        const chosen = filtered[selectedHistoryIndex];
+        if (e.shiftKey) {
+          setInputVal(chosen);
+          setShowHistoryOverlay(false);
+          mainInputRef.current?.focus();
+        } else {
+          setShowHistoryOverlay(false);
+          executeCommand(chosen);
+        }
+      }
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      if (filtered.length > 0 && filtered[selectedHistoryIndex]) {
+        setInputVal(filtered[selectedHistoryIndex]);
+        setShowHistoryOverlay(false);
+        mainInputRef.current?.focus();
       }
     }
   };
@@ -844,58 +1014,70 @@ export default function App() {
         </div>
       )}
 
-      {/* TOP STATUS BAR (Adhering to Section 44) */}
-      <header className="px-3 py-1.5 border-b border-[var(--line)] bg-[var(--panel)] flex flex-wrap items-center justify-between text-[11px] tracking-wider">
+      {/* TOP STATUS BAR — MULTI-COLOURED SCI-FI TELEMETRY RIBBON */}
+      <header className="px-3 py-1.5 border-b border-cyan-500/30 bg-[#051322]/90 backdrop-blur-md flex flex-wrap items-center justify-between text-[11px] tracking-wider">
         <div className="flex items-center space-x-2 sm:space-x-4">
-          <span className="font-bold text-[var(--accent)] tracking-[0.2em]">J.A.R.V.I.S. OS</span>
-          <span className="text-[var(--dim)] hidden sm:inline">|</span>
+          <span className="font-extrabold text-cyan-400 tracking-[0.25em] drop-shadow-[0_0_8px_rgba(0,240,255,0.7)]">
+            J.A.R.V.I.S. OS
+          </span>
+          <span className="text-cyan-800 hidden sm:inline">|</span>
 
-          {/* Core Status Badges */}
-          <div className="flex items-center space-x-3 text-[10px]">
-            <span className="flex items-center space-x-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-              <span className="text-[var(--dim)]">LOCAL CORE:</span>
+          {/* Chromatic Telemetry Channel Badges */}
+          <div className="flex items-center space-x-3 text-[10px] font-mono">
+            {/* Core Channel: Bio-Emerald */}
+            <span className="flex items-center space-x-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
+              <span className="text-slate-400">CORE:</span>
               <span className="text-emerald-300 font-bold">ONLINE</span>
             </span>
 
-            <span className="flex items-center space-x-1">
+            {/* Neural Channel: Electric Cyan */}
+            <span className="flex items-center space-x-1.5">
               <span
                 className={`inline-block w-1.5 h-1.5 rounded-full ${
                   neuralLinkOnline
-                    ? 'bg-[var(--accent)] shadow-[0_0_6px_var(--accent)]'
-                    : 'bg-red-500 shadow-[0_0_6px_#ef4444]'
+                    ? 'bg-cyan-400 shadow-[0_0_8px_#00f0ff]'
+                    : 'bg-rose-500 shadow-[0_0_8px_#f43f5e]'
                 }`}
               />
-              <span className="text-[var(--dim)]">NEURAL LINK:</span>
+              <span className="text-slate-400">NEURAL:</span>
               <span
                 className={`font-bold ${
-                  neuralLinkOnline ? 'text-[var(--accent)]' : 'text-red-400'
+                  neuralLinkOnline ? 'text-cyan-300' : 'text-rose-400'
                 }`}
               >
-                {neuralLinkOnline ? 'ONLINE' : 'OFFLINE'}
+                {neuralLinkOnline ? 'LINKED' : 'STANDBY'}
               </span>
             </span>
 
-            <span className="hidden md:flex items-center space-x-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span className="text-[var(--dim)]">FILESYSTEM:</span>
-              <span className="text-emerald-300 font-bold">READY</span>
+            {/* Sandbox Channel: Solar Amber */}
+            <span className="hidden md:flex items-center space-x-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]" />
+              <span className="text-slate-400">STORAGE:</span>
+              <span className="text-amber-300 font-bold">SECURE</span>
+            </span>
+
+            {/* Telemetry Polling Rate: Neon Violet */}
+            <span className="hidden lg:flex items-center space-x-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-purple-400 shadow-[0_0_8px_#c084fc]" />
+              <span className="text-slate-400">SYNC:</span>
+              <span className="text-purple-300 font-bold">{telemetryInterval}MS</span>
             </span>
           </div>
         </div>
 
         {/* Right Header Controls */}
         <div className="flex items-center space-x-2">
-          {/* Active Processing State Badge */}
+          {/* Active Processing State Badge with chromatic states */}
           <span
             className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
               processingState === 'IDLE'
-                ? 'border-[var(--line)] text-[var(--dim)]'
+                ? 'border-slate-700/80 text-slate-400 bg-slate-900/40'
                 : processingState === 'ERROR'
-                ? 'border-red-500 text-red-300 bg-red-950/40 animate-pulse'
+                ? 'border-rose-500 text-rose-300 bg-rose-950/60 shadow-[0_0_10px_rgba(244,63,94,0.4)] animate-pulse'
                 : processingState === 'WAITING FOR CONFIRMATION'
-                ? 'border-amber-500 text-amber-300 bg-amber-950/40 animate-pulse'
-                : 'border-[var(--accent)] text-[var(--accent)] bg-[var(--line)] animate-pulse'
+                ? 'border-amber-500 text-amber-300 bg-amber-950/60 shadow-[0_0_10px_rgba(245,158,11,0.4)] animate-pulse'
+                : 'border-cyan-400 text-cyan-300 bg-cyan-950/60 shadow-[0_0_12px_rgba(0,240,255,0.5)] animate-pulse font-bold'
             }`}
           >
             STATE: {processingState}
@@ -903,10 +1085,10 @@ export default function App() {
 
           <button
             onClick={() => setActiveModal('agent')}
-            className="hud-button text-[10px] py-0.5 px-2 flex items-center space-x-1"
+            className="hud-button text-[10px] py-0.5 px-2 flex items-center space-x-1 border-blue-500/50 text-blue-300 hover:bg-blue-500/20"
             title="Configure Local Windows Python Server"
           >
-            <Monitor className="w-3 h-3 inline mr-1" />
+            <Monitor className="w-3 h-3 inline mr-1 text-blue-400" />
             <span className="hidden md:inline">
               {isLocalWindowsConnected ? 'WINDOWS: 5000' : 'WINDOWS AGENT'}
             </span>
@@ -918,7 +1100,7 @@ export default function App() {
               const isDark = r.dataset.theme !== 'light';
               r.dataset.theme = isDark ? 'light' : 'dark';
             }}
-            className="hud-button text-[10px] py-0.5 px-2"
+            className="hud-button text-[10px] py-0.5 px-2 border-teal-500/50 text-teal-300 hover:bg-teal-500/20"
             title="Toggle Day/Stealth Theme"
           >
             THEME
@@ -930,92 +1112,110 @@ export default function App() {
       <main className="flex-1 p-3 grid grid-cols-1 md:grid-cols-[280px_1fr_360px] gap-3 min-h-0 overflow-hidden">
         {/* ================= LEFT COLUMN ================= */}
         <div className="flex flex-col gap-3 min-h-0 overflow-y-auto">
-          {/* CHRONOMETER */}
-          <div className="hud-panel p-3">
-            <h2 className="hud-title flex items-center justify-between">
-              <span>CHRONOMETER</span>
-              <Clock className="w-3 h-3 text-[var(--accent)]" />
+          {/* CHRONOMETER — Multi-tone Cyan & Amber Display */}
+          <div className="hud-panel p-3 border-cyan-500/30 bg-gradient-to-br from-[#061726]/90 to-[#092238]/90 shadow-[0_4px_20px_rgba(0,240,255,0.08)]">
+            <h2 className="hud-title flex items-center justify-between text-cyan-400">
+              <span className="tracking-[0.2em]">CHRONOMETER</span>
+              <Clock className="w-3.5 h-3.5 text-amber-400" />
             </h2>
-            <div className="text-3xl font-bold tracking-wider text-[var(--accent)] font-mono">
+            <div className="text-3xl font-extrabold tracking-wider text-cyan-300 font-mono drop-shadow-[0_0_12px_rgba(0,240,255,0.5)]">
               {timeStr}
             </div>
-            <div className="text-xs text-[var(--dim)] tracking-wider mt-1 font-mono">
+            <div className="text-xs text-amber-300/90 tracking-wider mt-1 font-mono font-medium">
               {dateStr}
             </div>
           </div>
 
-          {/* SYSTEM DIAGNOSTICS */}
-          <div className="hud-panel p-3 flex flex-col space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="hud-title mb-0 flex items-center space-x-1">
-                <Cpu className="w-3 h-3 text-[var(--accent)]" />
-                <span>SYSTEM DIAGNOSTICS</span>
+          {/* SYSTEM DIAGNOSTICS — Multi-Coloured Chromatic Telemetry */}
+          <div className="hud-panel p-3 flex flex-col space-y-3 border-amber-500/30 bg-gradient-to-br from-[#071626]/90 to-[#0d1d2f]/90 shadow-[0_4px_20px_rgba(245,158,11,0.06)]">
+            <div className="flex items-center justify-between pb-1 border-b border-amber-500/20">
+              <h2 className="hud-title mb-0 flex items-center space-x-1.5 text-amber-400">
+                <Cpu className="w-3.5 h-3.5 text-rose-400" />
+                <span className="tracking-[0.2em]">SYSTEM TELEMETRY</span>
               </h2>
               <button
                 onClick={() => {
                   fetchProcesses();
                   setActiveModal('processes');
                 }}
-                className="hud-button text-[10px] py-0.5 px-1.5 opacity-90"
-                title="View active processes"
+                className="hud-button text-[10px] py-0.5 px-2 border-purple-500/50 text-purple-300 hover:bg-purple-500/20"
+                title="View active workstation processes"
               >
                 PROCS
               </button>
             </div>
 
-            {/* Core Load */}
+            {/* Core Load (CPU) — Crimson & Rose */}
             <div>
-              <div className="flex justify-between text-xs text-[var(--dim)]">
-                <span>CORE LOAD</span>
-                <span className="text-[var(--accent)] font-mono">{systemStats.cpu.percent}%</span>
+              <div className="flex justify-between text-xs font-mono">
+                <span className="text-slate-400 flex items-center space-x-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block mr-1" />
+                  <span>CORE LOAD (CPU)</span>
+                </span>
+                <span className="text-rose-400 font-bold drop-shadow-[0_0_6px_rgba(244,63,94,0.4)]">
+                  {systemStats.cpu.percent}%
+                </span>
               </div>
-              <div className="h-1.5 bg-[var(--line)] rounded-full overflow-hidden mt-1">
+              <div className="h-1.5 bg-slate-900/90 rounded-full overflow-hidden mt-1 border border-rose-950">
                 <div
-                  className="h-full bg-[var(--accent)] transition-all duration-700"
+                  className="h-full bg-gradient-to-r from-amber-400 via-rose-500 to-red-500 transition-all duration-700 shadow-[0_0_8px_rgba(244,63,94,0.6)]"
                   style={{ width: `${Math.min(100, Math.max(5, systemStats.cpu.percent))}%` }}
                 />
               </div>
             </div>
 
-            {/* Memory */}
+            {/* Memory (RAM) — Solar Amber & Gold */}
             <div>
-              <div className="flex justify-between text-xs text-[var(--dim)]">
-                <span>MEMORY</span>
-                <span className="text-[var(--accent)] font-mono">{systemStats.memory.percent}%</span>
+              <div className="flex justify-between text-xs font-mono">
+                <span className="text-slate-400 flex items-center space-x-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block mr-1" />
+                  <span>MEMORY (RAM)</span>
+                </span>
+                <span className="text-amber-400 font-bold drop-shadow-[0_0_6px_rgba(245,158,11,0.4)]">
+                  {systemStats.memory.percent}%
+                </span>
               </div>
-              <div className="h-1.5 bg-[var(--line)] rounded-full overflow-hidden mt-1">
+              <div className="h-1.5 bg-slate-900/90 rounded-full overflow-hidden mt-1 border border-amber-950">
                 <div
-                  className="h-full bg-[var(--accent)] transition-all duration-700"
+                  className="h-full bg-gradient-to-r from-yellow-400 to-amber-500 transition-all duration-700 shadow-[0_0_8px_rgba(245,158,11,0.6)]"
                   style={{ width: `${Math.min(100, Math.max(5, systemStats.memory.percent))}%` }}
                 />
               </div>
             </div>
 
-            {/* Arc Output / Primary Storage */}
+            {/* Arc Output / Storage I/O — Electric Cyan & Cobalt */}
             <div>
-              <div className="flex justify-between text-xs text-[var(--dim)]">
-                <span>ARC OUTPUT (DISK)</span>
-                <span className="text-[var(--accent)] font-mono">{systemStats.disk.percent}%</span>
+              <div className="flex justify-between text-xs font-mono">
+                <span className="text-slate-400 flex items-center space-x-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block mr-1" />
+                  <span>ARC STORAGE (DISK)</span>
+                </span>
+                <span className="text-cyan-400 font-bold drop-shadow-[0_0_6px_rgba(0,240,255,0.4)]">
+                  {systemStats.disk.percent}%
+                </span>
               </div>
-              <div className="h-1.5 bg-[var(--line)] rounded-full overflow-hidden mt-1">
+              <div className="h-1.5 bg-slate-900/90 rounded-full overflow-hidden mt-1 border border-cyan-950">
                 <div
-                  className="h-full bg-[var(--accent)] transition-all duration-700"
+                  className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-700 shadow-[0_0_8px_rgba(0,240,255,0.6)]"
                   style={{ width: `${Math.min(100, Math.max(5, systemStats.disk.percent))}%` }}
                 />
               </div>
             </div>
 
-            {/* Network Throughput */}
+            {/* Network Throughput — Bio-Emerald */}
             <div>
-              <div className="flex justify-between text-xs text-[var(--dim)]">
-                <span>NETWORK THROUGHPUT</span>
-                <span className="text-[var(--accent)] font-mono">
+              <div className="flex justify-between text-xs font-mono">
+                <span className="text-slate-400 flex items-center space-x-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block mr-1" />
+                  <span>NETWORK BANDWIDTH</span>
+                </span>
+                <span className="text-emerald-400 font-bold drop-shadow-[0_0_6px_rgba(52,211,153,0.4)]">
                   {systemStats.network.mbps} Mb/s
                 </span>
               </div>
-              <div className="h-1.5 bg-[var(--line)] rounded-full overflow-hidden mt-1">
+              <div className="h-1.5 bg-slate-900/90 rounded-full overflow-hidden mt-1 border border-emerald-950">
                 <div
-                  className="h-full bg-[var(--accent)] transition-all duration-700"
+                  className="h-full bg-gradient-to-r from-emerald-400 to-teal-400 transition-all duration-700 shadow-[0_0_8px_rgba(52,211,153,0.6)]"
                   style={{
                     width: `${Math.min(100, Math.max(10, systemStats.network.mbps))}%`,
                   }}
@@ -1023,38 +1223,80 @@ export default function App() {
               </div>
             </div>
 
-            {/* Battery / Power */}
-            <div className="pt-1 border-t border-[var(--line)] text-xs text-[var(--dim)] flex items-center justify-between">
-              <span>DEVICE POWER:</span>
-              <span className="text-[var(--accent)] font-mono">
+            {/* Battery / Device Power — Emerald & Lime */}
+            <div className="pt-1 border-t border-slate-800 text-xs flex items-center justify-between font-mono">
+              <span className="text-slate-400">DEVICE POWER:</span>
+              <span className="text-emerald-300 font-bold">
                 {systemStats.battery.status_text}
               </span>
             </div>
 
-            {/* GPU Telemetry */}
-            <div className="text-[11px] text-[var(--dim)] flex items-center justify-between">
-              <span>GPU TELEMETRY:</span>
-              <span className="text-[var(--accent)] font-mono text-[10px]">
-                {systemStats.gpu?.name || 'GPU: UNAVAILABLE'}
+            {/* GPU Telemetry — Neon Violet */}
+            <div className="text-[11px] flex items-center justify-between font-mono">
+              <span className="text-slate-400">GPU ADAPTER:</span>
+              <span className="text-purple-400 font-bold text-[10px] truncate max-w-[150px]">
+                {systemStats.gpu?.name || 'GPU: ACTIVE'}
               </span>
+            </div>
+
+            {/* Telemetry Auto-Refresh Rate Selector — Chromatic Channels */}
+            <div className="pt-2 border-t border-slate-800 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-mono">
+                <span className="flex items-center space-x-1 text-slate-400">
+                  <Activity className="w-3 h-3 text-amber-400" />
+                  <span>REFRESH INTERVAL:</span>
+                </span>
+                <span className="text-amber-400 font-bold">
+                  {telemetryInterval}MS
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { label: '2500ms', value: 2500, color: 'cyan' },
+                  { label: '5000ms', value: 5000, color: 'amber' },
+                  { label: '10000ms', value: 10000, color: 'purple' },
+                ].map((opt) => {
+                  const isActive = telemetryInterval === opt.value;
+                  const borderActive =
+                    opt.color === 'cyan'
+                      ? 'border-cyan-400 text-cyan-300 bg-cyan-950/60 shadow-[0_0_10px_rgba(0,240,255,0.4)]'
+                      : opt.color === 'amber'
+                      ? 'border-amber-400 text-amber-300 bg-amber-950/60 shadow-[0_0_10px_rgba(245,158,11,0.4)]'
+                      : 'border-purple-400 text-purple-300 bg-purple-950/60 shadow-[0_0_10px_rgba(168,85,247,0.4)]';
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => handleTelemetryIntervalChange(opt.value)}
+                      className={`hud-button text-[10px] py-1 px-1 text-center font-mono font-bold transition-all ${
+                        isActive
+                          ? borderActive
+                          : 'border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                      }`}
+                      title={`Set telemetry refresh interval to ${opt.label}`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Quick Refresh Telemetry Button */}
             <button
               onClick={fetchTelemetry}
-              className="hud-button text-[11px] py-1 flex items-center justify-center space-x-1.5 opacity-80 hover:opacity-100"
+              className="hud-button text-[11px] py-1 flex items-center justify-center space-x-1.5 border-cyan-500/40 text-cyan-300 hover:border-amber-400 hover:text-amber-300 transition-colors"
             >
-              <RefreshCw className="w-3 h-3" />
-              <span>SYNC TELEMETRY</span>
+              <RefreshCw className="w-3 h-3 text-cyan-400" />
+              <span>SYNC TELEMETRY NOW</span>
             </button>
           </div>
 
-          {/* NOTES SCRATCHPAD */}
-          <div className="hud-panel p-3 flex-1 flex flex-col min-h-[140px]">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="hud-title mb-0 flex items-center space-x-1">
-                <FileText className="w-3 h-3 inline text-[var(--accent)]" />
-                <span>NOTES</span>
+          {/* NOTES SCRATCHPAD — Amber & Gold Cyber Terminal */}
+          <div className="hud-panel p-3 flex-1 flex flex-col min-h-[140px] border-amber-500/25 bg-gradient-to-br from-[#071626]/90 to-[#0c1a29]/90">
+            <div className="flex items-center justify-between mb-2 pb-1 border-b border-amber-500/20">
+              <h2 className="hud-title mb-0 flex items-center space-x-1.5 text-amber-400">
+                <FileText className="w-3.5 h-3.5 inline text-amber-400" />
+                <span className="tracking-[0.2em]">SCRATCHPAD NOTES</span>
               </h2>
               <div className="flex items-center space-x-1">
                 <button
@@ -1063,14 +1305,14 @@ export default function App() {
                     setHudStatus('NOTES COPIED TO CLIPBOARD');
                   }}
                   title="Copy Notes"
-                  className="text-[var(--dim)] hover:text-[var(--accent)] p-0.5"
+                  className="text-cyan-400 hover:text-cyan-300 p-0.5 rounded hover:bg-cyan-950/40 transition-colors"
                 >
                   <Copy className="w-3 h-3" />
                 </button>
                 <button
                   onClick={() => handleNotesChange('')}
                   title="Clear Notes"
-                  className="text-[var(--dim)] hover:text-red-400 p-0.5"
+                  className="text-rose-400 hover:text-rose-300 p-0.5 rounded hover:bg-rose-950/40 transition-colors"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>
@@ -1079,8 +1321,8 @@ export default function App() {
             <textarea
               value={notes}
               onChange={(e) => handleNotesChange(e.target.value)}
-              placeholder="Jot something down, sir... (Synced with SQLite database)"
-              className="flex-1 w-full bg-transparent border border-[var(--line)] text-[var(--text)] text-xs font-mono p-2 rounded resize-none outline-none focus:border-[var(--accent)]"
+              placeholder="Record directives, sir... (Synced with SQLite data repository)"
+              className="flex-1 w-full bg-black/30 border border-amber-500/20 text-amber-200 placeholder-slate-500 text-xs font-mono p-2 rounded resize-none outline-none focus:border-amber-400 focus:shadow-[0_0_8px_rgba(245,158,11,0.3)] transition-all"
             />
           </div>
         </div>
@@ -1089,87 +1331,120 @@ export default function App() {
         <div className="hud-panel p-4 flex flex-col items-center justify-center text-center relative overflow-hidden">
           <div className="absolute inset-0 pointer-events-none opacity-5 bg-[linear-gradient(to_right,#12d6ff_1px,transparent_1px),linear-gradient(to_bottom,#12d6ff_1px,transparent_1px)] bg-[size:24px_24px]" />
 
-          {/* ARC REACTOR SVG */}
+          {/* ARC REACTOR SVG — MULTI-COLOURED CHROMATIC FIELD */}
           <div className="relative my-auto flex flex-col items-center">
             <svg
               id="reactor"
               viewBox="0 0 300 300"
-              className="w-[min(42vh,100%)] max-w-[300px] aspect-square drop-shadow-[0_0_20px_var(--accent-glow)] transition-transform duration-500 hover:scale-105"
+              className={`w-[min(42vh,100%)] max-w-[300px] aspect-square drop-shadow-[0_0_25px_rgba(0,240,255,0.4)] transition-all duration-500 hover:scale-105 ${
+                isProcessing ? 'reactor-processing' : ''
+              }`}
+              data-processing={isProcessing ? 'true' : 'false'}
               aria-label="Arc reactor"
             >
-              <g fill="none" stroke="var(--accent)">
-                {/* Outer Ring */}
-                <circle cx="150" cy="150" r="140" strokeOpacity=".3" strokeWidth="1.5" />
+              <defs>
+                <radialGradient id="multiPlasmaGradient" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
+                  <stop offset="35%" stopColor="#00f0ff" stopOpacity="0.9" />
+                  <stop offset="70%" stopColor="#a855f7" stopOpacity="0.75" />
+                  <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.3" />
+                </radialGradient>
+                <radialGradient id="coreAuraGradient" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stopColor="#00f0ff" stopOpacity={isProcessing ? '0.9' : '0.6'} />
+                  <stop offset="55%" stopColor="#a855f7" stopOpacity={isProcessing ? '0.7' : '0.4'} />
+                  <stop offset="100%" stopColor="#071524" stopOpacity="0" />
+                </radialGradient>
+              </defs>
 
-                {/* Counter-Clockwise Rotating Outer Stator */}
-                <g className="spin">
+              <g fill="none">
+                {/* Outer Ring — Electric Cyan */}
+                <circle cx="150" cy="150" r="140" stroke="#00f0ff" strokeOpacity=".35" strokeWidth="1.5" />
+
+                {/* Counter-Clockwise Rotating Outer Stator — Neon Violet */}
+                <g className={isProcessing ? 'spin-fast' : 'spin'}>
                   <circle
                     cx="150"
                     cy="150"
                     r="125"
+                    stroke="#c084fc"
                     strokeWidth="3.5"
                     strokeDasharray="40 18 8 18"
+                    strokeOpacity=".9"
                   />
                   <circle
                     cx="150"
                     cy="150"
                     r="115"
-                    strokeWidth="1"
+                    stroke="#a855f7"
+                    strokeWidth="1.2"
                     strokeDasharray="4 8"
-                    strokeOpacity=".6"
+                    strokeOpacity=".7"
                   />
                 </g>
 
-                {/* Clockwise Rotating Inner Ring */}
-                <g className="spin2">
-                  <circle cx="150" cy="150" r="100" strokeWidth="2.5" strokeDasharray="6 12" />
-                  <circle cx="150" cy="150" r="88" strokeWidth="1" strokeDasharray="18 10 4 10" />
+                {/* Clockwise Rotating Inner Ring — Solar Amber */}
+                <g className={isProcessing ? 'spin2-fast' : 'spin2'}>
+                  <circle cx="150" cy="150" r="100" stroke="#fbbf24" strokeWidth="2.5" strokeDasharray="6 12" strokeOpacity=".9" />
+                  <circle cx="150" cy="150" r="88" stroke="#f59e0b" strokeWidth="1.2" strokeDasharray="18 10 4 10" strokeOpacity=".7" />
                 </g>
 
-                {/* Inner Static Containment Ring */}
-                <circle cx="150" cy="150" r="72" strokeWidth="2.5" strokeOpacity=".85" />
+                {/* Inner Static Containment Ring — Deep Cobalt */}
+                <circle cx="150" cy="150" r="72" stroke="#38bdf8" strokeWidth="2.5" strokeOpacity=".9" />
 
-                {/* Magnetic Coils / Field Guides */}
-                <g strokeWidth="5" strokeOpacity=".9" strokeLinecap="round">
+                {/* Magnetic Coils / Field Guides — Bio-Emerald Plasma */}
+                <g stroke="#34d399" strokeWidth="5" strokeOpacity=".95" strokeLinecap="round">
                   <path d="M150 82v-18M150 218v18M82 150H64M218 150h18M102 102L89 89M198 198l13 13M198 102l13-13M102 198L89 211" />
                 </g>
               </g>
 
-              {/* Pulsating Core */}
+              {/* Pulsating Chromatic Plasma Aura */}
               <circle
                 id="core"
-                className="core-pulse"
+                className={`core-pulse ${isProcessing ? 'core-pulse-active' : ''}`}
                 cx="150"
                 cy="150"
-                r="40"
-                fill="var(--accent)"
-                fillOpacity=".25"
-                stroke="var(--accent)"
-                strokeWidth="3"
+                r="42"
+                fill="url(#coreAuraGradient)"
+                stroke="#00f0ff"
+                strokeWidth={isProcessing ? '4' : '3'}
               />
-              <circle cx="150" cy="150" r="18" fill="var(--accent)" />
+
+              {/* Inner Multi-Colored Plasma Core */}
+              <circle
+                cx="150"
+                cy="150"
+                r={isProcessing ? '22' : '18'}
+                fill="url(#multiPlasmaGradient)"
+                className={isProcessing ? 'core-inner-active' : ''}
+              />
             </svg>
 
-            {/* J.A.R.V.I.S. Title */}
-            <div className="text-xl md:text-2xl font-black tracking-[0.45em] text-[var(--accent)] mt-3">
+            {/* J.A.R.V.I.S. Title — Multi-Coloured Sci-Fi Gradient */}
+            <div className="text-xl md:text-2xl font-black tracking-[0.45em] bg-gradient-to-r from-cyan-400 via-purple-300 to-amber-300 bg-clip-text text-transparent mt-3 drop-shadow-[0_0_15px_rgba(0,240,255,0.4)]">
               J.A.R.V.I.S.
             </div>
 
             {/* Sub-status Indicator */}
             <div
               id="status"
-              className="text-xs tracking-wider text-[var(--dim)] mt-1 max-w-sm truncate h-5 font-mono"
+              className="text-xs tracking-wider text-cyan-200/90 mt-1 max-w-sm truncate h-5 font-mono drop-shadow-[0_0_6px_rgba(0,240,255,0.3)]"
             >
               {hudStatus}
             </div>
           </div>
 
-          {/* Quick HUD Navigation Buttons */}
-          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 w-full max-w-xl mt-auto pt-3 border-t border-[var(--line)]">
-            <button onClick={() => executeCommand('time')} className="hud-button text-xs py-1.5">
+          {/* Quick HUD Navigation Buttons — Multi-Coloured Sci-Fi Matrix */}
+          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 w-full max-w-xl mt-auto pt-3 border-t border-cyan-500/20">
+            <button
+              onClick={() => executeCommand('time')}
+              className="hud-button text-xs py-1.5 border-cyan-500/60 text-cyan-300 hover:bg-cyan-500/20 shadow-[0_0_8px_rgba(0,240,255,0.2)]"
+            >
               TIME
             </button>
-            <button onClick={() => executeCommand('scan')} className="hud-button text-xs py-1.5">
+            <button
+              onClick={() => executeCommand('scan')}
+              className="hud-button text-xs py-1.5 border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/20 shadow-[0_0_8px_rgba(16,185,129,0.2)]"
+            >
               SCAN
             </button>
             <button
@@ -1177,12 +1452,15 @@ export default function App() {
                 fetchTerminalStatus();
                 setActiveModal('terminal');
               }}
-              className="hud-button text-xs py-1.5 border-[var(--accent)] text-[var(--accent)] font-bold"
+              className="hud-button text-xs py-1.5 border-rose-500/70 text-rose-300 hover:bg-rose-500/20 shadow-[0_0_10px_rgba(244,63,94,0.3)] font-bold"
               title="Dedicated CMD Console"
             >
               CMD
             </button>
-            <button onClick={() => setActiveModal('apps')} className="hud-button text-xs py-1.5">
+            <button
+              onClick={() => setActiveModal('apps')}
+              className="hud-button text-xs py-1.5 border-purple-500/60 text-purple-300 hover:bg-purple-500/20 shadow-[0_0_8px_rgba(168,85,247,0.2)]"
+            >
               APPS
             </button>
             <button
@@ -1190,54 +1468,279 @@ export default function App() {
                 fetchFolderFiles('desktop');
                 setActiveModal('files');
               }}
-              className="hud-button text-xs py-1.5"
+              className="hud-button text-xs py-1.5 border-amber-500/60 text-amber-300 hover:bg-amber-500/20 shadow-[0_0_8px_rgba(245,158,11,0.2)]"
             >
               FILES
             </button>
-            <button onClick={() => setActiveModal('windows')} className="hud-button text-xs py-1.5">
+            <button
+              onClick={() => setActiveModal('windows')}
+              className="hud-button text-xs py-1.5 border-red-500/60 text-red-300 hover:bg-red-500/20 shadow-[0_0_8px_rgba(239,68,68,0.2)]"
+            >
               POWER
             </button>
-            <button onClick={() => executeCommand('theme')} className="hud-button text-xs py-1.5">
+            <button
+              onClick={() => executeCommand('theme')}
+              className="hud-button text-xs py-1.5 border-teal-500/60 text-teal-300 hover:bg-teal-500/20 shadow-[0_0_8px_rgba(20,184,166,0.2)]"
+            >
               THEME
             </button>
-            <button onClick={() => setActiveModal('help')} className="hud-button text-xs py-1.5">
+            <button
+              onClick={() => setActiveModal('help')}
+              className="hud-button text-xs py-1.5 border-yellow-500/60 text-yellow-300 hover:bg-yellow-500/20 shadow-[0_0_8px_rgba(234,179,8,0.2)]"
+            >
               HELP
             </button>
           </div>
         </div>
 
-        {/* ================= RIGHT COLUMN (COMMAND CONSOLE) ================= */}
-        <div className="hud-panel p-3 flex flex-col min-h-0 relative">
-          <div className="flex items-center justify-between mb-2 pb-1 border-b border-[var(--line)]">
+        {/* ================= RIGHT COLUMN (COMMAND CONSOLE & SEARCHABLE HISTORY OVERLAY) ================= */}
+        <div className="hud-panel p-3 flex flex-col min-h-0 relative border-purple-500/30 bg-gradient-to-br from-[#061524]/90 to-[#0c182b]/90 shadow-[0_4px_20px_rgba(168,85,247,0.06)]">
+          {/* Header Bar */}
+          <div className="flex items-center justify-between mb-2 pb-1 border-b border-purple-500/20">
             <div className="flex items-center space-x-2">
-              <h2 className="hud-title mb-0 flex items-center space-x-1.5">
-                <Terminal className="w-3.5 h-3.5 text-[var(--accent)]" />
-                <span>COMMAND CONSOLE</span>
+              <h2 className="hud-title mb-0 flex items-center space-x-1.5 text-cyan-400">
+                <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="tracking-[0.2em]">COMMAND CONSOLE</span>
               </h2>
               <button
                 onClick={() => {
                   fetchTerminalStatus();
                   setActiveModal('terminal');
                 }}
-                className="hud-button text-[9px] py-0.5 px-1.5 text-[var(--accent)]"
+                className="hud-button text-[9px] py-0.5 px-1.5 border-rose-500/50 text-rose-300 hover:bg-rose-500/20"
                 title="Open CMD Automation Control"
               >
                 CMD HUD
+              </button>
+              <button
+                onClick={() => {
+                  setShowHistoryOverlay((prev) => !prev);
+                  setHistorySearchQuery('');
+                  setSelectedHistoryIndex(0);
+                }}
+                className={`hud-button text-[9px] py-0.5 px-2 flex items-center space-x-1 font-bold ${
+                  showHistoryOverlay
+                    ? 'border-purple-400 text-purple-300 bg-purple-950/60 shadow-[0_0_10px_rgba(168,85,247,0.4)]'
+                    : 'border-purple-500/50 text-purple-300 hover:bg-purple-500/20'
+                }`}
+                title="Search Command History (Ctrl+H or type 'history')"
+              >
+                <History className="w-3 h-3 text-purple-400" />
+                <span>HISTORY</span>
               </button>
             </div>
             <div className="flex items-center space-x-2">
               <button
                 onClick={fetchClipboard}
-                className="text-[var(--dim)] hover:text-[var(--accent)]"
+                className="text-slate-400 hover:text-cyan-400 transition-colors"
                 title="Inspect Clipboard"
               >
                 <Clipboard className="w-3.5 h-3.5" />
               </button>
-              <span className="text-[10px] text-[var(--dim)] font-mono">
+              <span className="text-[10px] text-amber-400 font-mono">
                 {consoleLogs.length} LOGS
               </span>
             </div>
           </div>
+
+          {/* SEARCHABLE COMMAND HISTORY OVERLAY */}
+          {showHistoryOverlay && (
+            <div className="absolute inset-0 z-30 bg-[#040e1b]/98 backdrop-blur-xl flex flex-col p-3 rounded-lg border border-purple-500/60 shadow-[0_0_35px_rgba(168,85,247,0.3)] animate-in fade-in zoom-in-95 duration-150 font-mono">
+              {/* Overlay Header */}
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-purple-500/30">
+                <div className="flex items-center space-x-2">
+                  <History className="w-4 h-4 text-purple-400" />
+                  <span className="text-xs font-bold bg-gradient-to-r from-purple-300 via-cyan-300 to-amber-300 bg-clip-text text-transparent tracking-wider">
+                    COMMAND HISTORY ARCHIVE
+                  </span>
+                  <span className="text-[10px] text-amber-400 font-mono bg-amber-950/40 border border-amber-500/30 px-1.5 py-0.2 rounded">
+                    {filteredHistory.length} OF {history.length}
+                  </span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  {history.length > 0 && (
+                    <button
+                      onClick={clearAllHistory}
+                      className="text-[9px] text-rose-400 hover:text-rose-300 border border-rose-500/30 hover:border-rose-400 px-1.5 py-0.5 rounded hover:bg-rose-950/40 transition-colors"
+                      title="Purge all saved history"
+                    >
+                      CLEAR ALL
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setShowHistoryOverlay(false);
+                      mainInputRef.current?.focus();
+                    }}
+                    className="text-cyan-400 hover:text-cyan-200 text-sm font-bold px-1 rounded hover:bg-cyan-950/40"
+                    title="Close Overlay (ESC)"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Filter Bar */}
+              <div className="relative mb-2">
+                <Search className="w-3.5 h-3.5 text-cyan-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  ref={historySearchInputRef}
+                  type="text"
+                  value={historySearchQuery}
+                  onChange={(e) => {
+                    setHistorySearchQuery(e.target.value);
+                    setSelectedHistoryIndex(0);
+                  }}
+                  onKeyDown={(e) => handleHistoryOverlayKeyDown(e, filteredHistory)}
+                  placeholder="Filter past commands (e.g. scan, cmd, ping)..."
+                  className="w-full bg-black/40 border border-cyan-500/40 text-cyan-100 placeholder-slate-500 text-xs pl-8 pr-7 py-1.5 rounded outline-none focus:border-cyan-300 focus:shadow-[0_0_10px_rgba(0,240,255,0.3)] transition-all font-mono"
+                  autoComplete="off"
+                />
+                {historySearchQuery && (
+                  <button
+                    onClick={() => {
+                      setHistorySearchQuery('');
+                      setSelectedHistoryIndex(0);
+                      historySearchInputRef.current?.focus();
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-cyan-300 text-xs"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Sci-Fi Category Filter Chips */}
+              <div className="flex items-center gap-1.5 mb-2 text-[10px]">
+                {[
+                  { id: 'ALL', label: 'ALL CHANNELS', color: 'border-cyan-500/40 text-cyan-300' },
+                  { id: 'SYSTEM', label: 'SYSTEM', color: 'border-amber-500/40 text-amber-300' },
+                  { id: 'TERMINAL', label: 'TERMINAL', color: 'border-rose-500/40 text-rose-300' },
+                  { id: 'APPS', label: 'APPS & DATA', color: 'border-purple-500/40 text-purple-300' },
+                ].map((chip) => {
+                  const isAct = historyCategoryFilter === chip.id;
+                  return (
+                    <button
+                      key={chip.id}
+                      onClick={() => {
+                        setHistoryCategoryFilter(chip.id as any);
+                        setSelectedHistoryIndex(0);
+                      }}
+                      className={`px-2 py-0.5 rounded border transition-all ${chip.color} ${
+                        isAct
+                          ? 'bg-slate-800/90 font-bold shadow-[0_0_6px_rgba(255,255,255,0.15)] border-white/60 text-white'
+                          : 'opacity-70 hover:opacity-100 bg-black/20'
+                      }`}
+                    >
+                      {chip.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Filtered History Command List */}
+              <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0 text-xs">
+                {filteredHistory.length === 0 ? (
+                  <div className="text-center py-8 text-slate-400 space-y-2 font-mono">
+                    <div className="text-xs">No recorded commands matching filter.</div>
+                    {historySearchQuery && (
+                      <button
+                        onClick={() => {
+                          setHistorySearchQuery('');
+                          setHistoryCategoryFilter('ALL');
+                          setSelectedHistoryIndex(0);
+                        }}
+                        className="hud-button text-[10px] py-1 px-2 border-cyan-500/40 text-cyan-300"
+                      >
+                        RESET QUERY
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  filteredHistory.map((cmd, idx) => {
+                    const isSelected = idx === selectedHistoryIndex;
+                    return (
+                      <div
+                        key={`${cmd}-${idx}`}
+                        onClick={() => {
+                          setShowHistoryOverlay(false);
+                          executeCommand(cmd);
+                        }}
+                        className={`group flex items-center justify-between p-2 rounded cursor-pointer transition-all border ${
+                          isSelected
+                            ? 'border-purple-400/90 bg-gradient-to-r from-purple-950/60 via-cyan-950/40 to-slate-900/60 shadow-[0_0_12px_rgba(168,85,247,0.3)] text-white'
+                            : 'border-slate-800/80 bg-black/30 hover:border-slate-700 hover:bg-black/50 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2 min-w-0 flex-1 pr-2">
+                          <span
+                            className={`text-[10px] font-mono font-bold ${
+                              isSelected ? 'text-cyan-300' : 'text-purple-400'
+                            }`}
+                          >
+                            &gt;_
+                          </span>
+                          <span className="font-mono text-xs truncate group-hover:text-cyan-300">
+                            {cmd}
+                          </span>
+                        </div>
+                        <div className="flex items-center space-x-1.5 opacity-90">
+                          {/* Recall to Input Box */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInputVal(cmd);
+                              setShowHistoryOverlay(false);
+                              mainInputRef.current?.focus();
+                            }}
+                            className="p-1 text-cyan-400 hover:text-cyan-200 hover:bg-cyan-950/50 rounded transition-colors"
+                            title="Recall into input box (edit before executing) [TAB / Shift+Enter]"
+                          >
+                            <CornerDownLeft className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Execute immediately */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowHistoryOverlay(false);
+                              executeCommand(cmd);
+                            }}
+                            className="p-1 text-emerald-400 hover:text-emerald-200 hover:bg-emerald-950/50 rounded transition-colors"
+                            title="Execute command immediately [ENTER]"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                          </button>
+
+                          {/* Remove from history */}
+                          <button
+                            type="button"
+                            onClick={(e) => removeFromHistory(cmd, e)}
+                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 rounded transition-colors"
+                            title="Remove from history"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Sci-Fi Keyboard Shortcut Footer */}
+              <div className="pt-2 mt-2 border-t border-purple-500/20 flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                <span className="text-cyan-300/80">
+                  <span className="text-purple-300 font-bold">[↑/↓]</span> Navigate ·{' '}
+                  <span className="text-emerald-300 font-bold">[ENTER]</span> Run ·{' '}
+                  <span className="text-cyan-300 font-bold">[TAB]</span> Recall
+                </span>
+                <span className="text-slate-500 font-bold">[ESC] Close</span>
+              </div>
+            </div>
+          )}
 
           {/* Message Log */}
           <div
@@ -1245,7 +1748,7 @@ export default function App() {
             className="flex-1 overflow-y-auto space-y-3 font-mono text-xs pr-1 min-h-0"
           >
             {consoleLogs.length === 0 && (
-              <div className="text-[var(--dim)] text-xs text-center py-10 opacity-60">
+              <div className="text-slate-500 text-xs text-center py-10 opacity-70 font-mono">
                 Awaiting your command, sir.
                 <br />
                 Type or speak using the MIC button below.
@@ -1255,47 +1758,48 @@ export default function App() {
             {consoleLogs.map((log) => (
               <div key={log.id} className="leading-relaxed">
                 {log.sender === 'user' ? (
-                  <div className="text-[var(--dim)]">
-                    <span className="text-[var(--accent)] font-bold">&gt;&gt; USER:</span> {log.text}
+                  <div className="text-slate-200">
+                    <span className="text-amber-400 font-bold mr-1.5">&gt;&gt; USER:</span>
+                    <span>{log.text}</span>
                   </div>
                 ) : (
-                  <div className="text-[var(--text)] pl-1 border-l-2 border-[var(--accent)] bg-[rgba(18,214,255,0.02)] p-1.5 rounded-r">
-                    <div className="flex items-center justify-between text-[10px] text-[var(--dim)] mb-0.5">
-                      <span className="font-bold text-[var(--accent)] flex items-center space-x-1">
-                        <Sparkles className="w-2.5 h-2.5 inline" />
-                        <span>JARVIS</span>
+                  <div className="text-slate-100 pl-2 border-l-2 border-cyan-400 bg-gradient-to-r from-cyan-950/30 via-purple-950/20 to-transparent p-2 rounded-r shadow-sm">
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
+                      <span className="font-bold text-cyan-300 flex items-center space-x-1">
+                        <Sparkles className="w-3 h-3 inline text-purple-400" />
+                        <span className="text-purple-300">JARVIS</span>
                       </span>
                       <div className="flex items-center space-x-2">
                         {log.operation_id && (
-                          <span className="text-[9px] bg-[var(--line)] px-1 rounded text-[var(--accent)]">
+                          <span className="text-[9px] bg-cyan-950 border border-cyan-500/30 px-1 rounded text-cyan-300">
                             {log.operation_id}
                           </span>
                         )}
-                        <span>{log.timestamp}</span>
+                        <span className="text-slate-500">{log.timestamp}</span>
                       </div>
                     </div>
 
                     {log.isProcessing ? (
-                      <div className="flex items-center space-x-2 text-[var(--accent)] py-1">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
+                      <div className="flex items-center space-x-2 text-cyan-300 py-1">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-400" />
                         <span className="italic">{log.text}</span>
                       </div>
                     ) : (
-                      <div className="whitespace-pre-wrap">{log.text}</div>
+                      <div className="whitespace-pre-wrap leading-relaxed">{log.text}</div>
                     )}
 
                     {/* Tool execution badge if present */}
                     {log.action && (
-                      <div className="mt-1.5 pt-1 border-t border-[var(--line)] flex items-center space-x-1.5 text-[10px] text-[var(--dim)]">
-                        <span className="bg-[var(--line)] text-[var(--text)] px-1.5 py-0.5 rounded font-mono">
+                      <div className="mt-1.5 pt-1 border-t border-slate-800 flex items-center space-x-1.5 text-[10px]">
+                        <span className="bg-slate-900 border border-slate-700 text-slate-300 px-1.5 py-0.5 rounded font-mono">
                           TOOL: {log.action.tool}
                         </span>
                         {log.action.result?.success !== false ? (
-                          <span className="text-emerald-400 flex items-center">
+                          <span className="text-emerald-400 flex items-center font-bold">
                             <CheckCircle className="w-2.5 h-2.5 mr-0.5" /> SUCCESS
                           </span>
                         ) : (
-                          <span className="text-rose-400 flex items-center">
+                          <span className="text-rose-400 flex items-center font-bold">
                             <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> REJECTED
                           </span>
                         )}
@@ -1309,7 +1813,7 @@ export default function App() {
 
           {/* DESTRUCTIVE ACTION CONFIRMATION BAR */}
           {pendingConfirm && (
-            <div className="mt-2 p-2.5 bg-red-950/70 border border-red-500 rounded text-xs space-y-2 animate-pulse">
+            <div className="mt-2 p-2.5 bg-red-950/80 border border-red-500 rounded text-xs space-y-2 animate-pulse">
               <div className="flex items-center justify-between text-red-300 font-bold">
                 <span className="flex items-center space-x-1.5">
                   <ShieldAlert className="w-4 h-4 text-red-400" />
@@ -1325,13 +1829,13 @@ export default function App() {
               <div className="flex items-center space-x-2 pt-1">
                 <button
                   onClick={() => handleConfirmAction(true)}
-                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-3 py-1 rounded text-xs"
+                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-3 py-1 rounded text-xs transition-colors"
                 >
                   CONFIRM EXECUTION
                 </button>
                 <button
                   onClick={() => handleConfirmAction(false)}
-                  className="bg-neutral-700 hover:bg-neutral-600 text-white px-3 py-1 rounded text-xs"
+                  className="bg-neutral-700 hover:bg-neutral-600 text-white px-3 py-1 rounded text-xs transition-colors"
                 >
                   CANCEL
                 </button>
@@ -1340,8 +1844,27 @@ export default function App() {
           )}
 
           {/* Console Input Bar */}
-          <div className="mt-3 pt-2 border-t border-[var(--line)] flex items-center gap-1.5">
+          <div className="mt-3 pt-2 border-t border-purple-500/20 flex items-center gap-1.5">
+            {/* HISTORY TOGGLE BUTTON */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowHistoryOverlay((prev) => !prev);
+                setHistorySearchQuery('');
+                setSelectedHistoryIndex(0);
+              }}
+              className={`hud-button p-2 border-purple-500/50 text-purple-300 hover:bg-purple-500/20 ${
+                showHistoryOverlay
+                  ? 'border-purple-400 bg-purple-950/60 shadow-[0_0_8px_rgba(168,85,247,0.4)]'
+                  : ''
+              }`}
+              title="Search Past Commands (Ctrl+H or type 'history')"
+            >
+              <History className="w-4 h-4" />
+            </button>
+
             <input
+              ref={mainInputRef}
               type="text"
               value={inputVal}
               onChange={(e) => setInputVal(e.target.value)}
@@ -1352,16 +1875,18 @@ export default function App() {
                   ? 'Analyzing intent...'
                   : processingState === 'EXECUTING'
                   ? 'Executing local tool...'
-                  : 'Type a command or query...'
+                  : 'Type a command or query (Ctrl+H for history)...'
               }
-              className="hud-input flex-1 text-xs"
+              className="hud-input flex-1 text-xs border-cyan-500/40 focus:border-cyan-300 focus:shadow-[0_0_10px_rgba(0,240,255,0.4)]"
               autoComplete="off"
             />
 
             {/* MIC BUTTON */}
             <button
               onClick={toggleSpeechRecognition}
-              className={`hud-button p-2 ${isListening ? 'active animate-pulse' : ''}`}
+              className={`hud-button p-2 border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/20 ${
+                isListening ? 'active animate-pulse border-emerald-400 text-emerald-300 bg-emerald-950/40' : ''
+              }`}
               title="Voice Input (Speech Recognition)"
             >
               <Mic className="w-4 h-4" />
@@ -1376,10 +1901,12 @@ export default function App() {
                 addJarvisLog(msg);
                 if (nextVox) speak(msg);
               }}
-              className={`hud-button p-2 ${voxEnabled ? 'active' : ''}`}
+              className={`hud-button p-2 border-amber-500/50 text-amber-300 hover:bg-amber-500/20 ${
+                voxEnabled ? 'active border-amber-400 text-amber-300 bg-amber-950/40 shadow-[0_0_8px_rgba(245,158,11,0.4)]' : ''
+              }`}
               title="Voice Output (Speech Synthesis)"
             >
-              {voxEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              {voxEnabled ? <Volume2 className="w-4 h-4 text-amber-400" /> : <VolumeX className="w-4 h-4 text-slate-500" />}
             </button>
           </div>
         </div>
@@ -1795,40 +2322,55 @@ export default function App() {
               </div>
 
               <div>
-                <span className="text-[var(--accent)] font-bold">DIRECT HUD COMMANDS:</span>
-                <div className="grid grid-cols-2 gap-1.5 mt-1 text-[var(--dim)]">
+                <span className="text-amber-400 font-bold tracking-wider">DIRECT HUD COMMANDS:</span>
+                <div className="grid grid-cols-2 gap-1.5 mt-1.5 text-xs font-mono">
                   <div>
-                    <code className="text-[var(--text)]">time</code> — Chronometer
+                    <code className="text-cyan-300 font-bold bg-cyan-950/40 px-1 py-0.5 rounded border border-cyan-500/30">time</code>
+                    <span className="text-slate-400 ml-1.5">— Chronometer</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">scan</code> — Full Diagnostic
+                    <code className="text-emerald-300 font-bold bg-emerald-950/40 px-1 py-0.5 rounded border border-emerald-500/30">scan</code>
+                    <span className="text-slate-400 ml-1.5">— Full Diagnostic</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">cmd</code> — Terminal Automation
+                    <code className="text-rose-300 font-bold bg-rose-950/40 px-1 py-0.5 rounded border border-rose-500/30">cmd</code>
+                    <span className="text-slate-400 ml-1.5">— Terminal Automation</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">apps</code> — App Registry
+                    <code className="text-purple-300 font-bold bg-purple-950/40 px-1 py-0.5 rounded border border-purple-500/30">history</code>
+                    <span className="text-slate-400 ml-1.5">— Search History (Ctrl+H)</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">files</code> — Sandbox Explorer
+                    <code className="text-purple-300 font-bold bg-purple-950/40 px-1 py-0.5 rounded border border-purple-500/30">apps</code>
+                    <span className="text-slate-400 ml-1.5">— App Registry</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">processes</code> — Task Telemetry
+                    <code className="text-amber-300 font-bold bg-amber-950/40 px-1 py-0.5 rounded border border-amber-500/30">files</code>
+                    <span className="text-slate-400 ml-1.5">— Sandbox Explorer</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">windows</code> — Power Control
+                    <code className="text-emerald-300 font-bold bg-emerald-950/40 px-1 py-0.5 rounded border border-emerald-500/30">processes</code>
+                    <span className="text-slate-400 ml-1.5">— Task Telemetry</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">clip</code> — Clipboard Buffer
+                    <code className="text-red-300 font-bold bg-red-950/40 px-1 py-0.5 rounded border border-red-500/30">windows</code>
+                    <span className="text-slate-400 ml-1.5">— Power Control</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">theme</code> — Day / Stealth
+                    <code className="text-cyan-300 font-bold bg-cyan-950/40 px-1 py-0.5 rounded border border-cyan-500/30">clip</code>
+                    <span className="text-slate-400 ml-1.5">— Clipboard Buffer</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">vox</code> — Voice Audio
+                    <code className="text-teal-300 font-bold bg-teal-950/40 px-1 py-0.5 rounded border border-teal-500/30">theme</code>
+                    <span className="text-slate-400 ml-1.5">— Day / Stealth</span>
                   </div>
                   <div>
-                    <code className="text-[var(--text)]">note &lt;text&gt;</code> — Scratchpad
+                    <code className="text-amber-300 font-bold bg-amber-950/40 px-1 py-0.5 rounded border border-amber-500/30">vox</code>
+                    <span className="text-slate-400 ml-1.5">— Voice Audio</span>
+                  </div>
+                  <div>
+                    <code className="text-yellow-300 font-bold bg-yellow-950/40 px-1 py-0.5 rounded border border-yellow-500/30">note &lt;text&gt;</code>
+                    <span className="text-slate-400 ml-1.5">— Scratchpad</span>
                   </div>
                 </div>
               </div>
